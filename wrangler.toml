@@ -1,23 +1,23 @@
-# Cloudflare Workers 配置（wrangler CLI 部署用）
-# 如果用 Dashboard 粘贴部署，可忽略本文件，见 DEPLOY_CLOUDFLARE.md
+# Cloudflare Workers 配置（Deploy 按钮与 wrangler CLI 都会读取此文件）
 name = "dylan-heartbeat"
 main = "worker.js"
 compatibility_date = "2024-09-23"
 
-# KV 存储：时间线 / 日记 / 配置 / 时间戳记忆库
-# 创建方式：wrangler kv namespace create CONFIG
-# 然后把输出里的 id 填到下面（id 是每个账号独有的，不能直接复制别人的）
-[[kv_namespaces]]
-binding = "CONFIG"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
-
-# 定时自动唤醒：每分钟触发一次（免费计划支持），代码内会自行判断是否需要真正唤醒
+# 定时自动唤醒：每分钟触发一次（免费计划支持），代码内部自行判断是否真正需要唤醒
 [triggers]
 crons = ["* * * * *"]
 
-# 非敏感配置可放这里；敏感配置（API Key 等）用 Cloudflare 面板的 Variables/Secrets 设置
+# KV 绑定（时间线 / 日记 / 配置 / 时间戳记忆库）：
+# 命名空间 id 每个账号独有，请创建后手动绑定，二选一：
+#   方式一（推荐）：Cloudflare 面板 Settings → Variables → KV Namespace Bindings → 绑定名 CONFIG
+#   方式二（CLI）：先运行 wrangler kv namespace create CONFIG，把输出的 id 填到下面并取消注释
+# [[kv_namespaces]]
+# binding = "CONFIG"
+# id = "你的_KV_命名空间_ID"
+
+# 非敏感配置可放这里；敏感配置（API Key 等）请用面板的 Variables/Secrets 设置
 # [vars]
 # TIME_ZONE = "Asia/Shanghai"
-# MODEL_NAME = "你的模型名称"
+# MODEL_NAME = "deepseek-chat"
 # WAKE_MIN_MINUTES = "2"
 # WAKE_MAX_MINUTES = "180"

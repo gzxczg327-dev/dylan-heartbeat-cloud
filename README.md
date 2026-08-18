@@ -1,79 +1,135 @@
-# Dylan Heartbeat — Cloud（免费云端版）
+# Dylan Heartbeat — Cloud
 
-让 **Kelivo** 里的 AI 伴侣 24 小时在线、永久免费运行：当你沉默时，AI 会自己醒来，决定要不要主动给你发消息（iPhone 的 Bark / 安卓的 ntfy 推送），并把这些主动行为记进共同记忆里。
+让 Kelivo 里的 AI 伴侣 24 小时在线、永久免费运行：在你沉默时，AI 会自己醒来并主动联系你。
 
-> 这是 [callie0313/dylan-heartbeat](https://github.com/callie0313/dylan-heartbeat) 的 **Cloudflare Workers 免费云端版**：核心逻辑沿用原项目，只是把「需要自建/付费的 Node 服务器」换成「永久免费的 Cloudflare Worker」。
+本项目是 [callie0313/dylan-heartbeat](https://github.com/callie0313/dylan-heartbeat) 的云端部署版，把运行平台从「需要自建、需要付费的 Node 服务器」换成「免费、免维护的 Cloudflare Workers」。
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/gzxczg327-dev/dylan-heartbeat-cloud)
 
----
+## 致敬原作者
 
-## ✨ 核心能力
+本项目的核心设计 —— 主动唤醒、时间线记忆、推送机制 —— 全部来自 [callie0313/dylan-heartbeat](https://github.com/callie0313/dylan-heartbeat)，作者 Callie。本仓库没有改动任何核心逻辑，只做了一件事：把运行方式从付费服务器改写为 Cloudflare Workers，让更多人能零成本使用。感谢原作者的开放与贡献。
 
-- 🧠 持续记忆 — 对话存 Cloudflare KV，AI 记得发生过的事
-- ⏰ 主动唤醒 — 你不说话，AI 自己醒来，按配置的随机间隔主动找你（默认 2~180 分钟）
-- 📳 手机推送 — Bark（iPhone）/ ntfy（安卓）
-- 💬 连发对话 — AI 不再一问一答，可一次连发几句短句
-- 🎭 人设不破坏 — 完整保留你在 Kelivo 里设置的角色
-- 🌡️ 话题素材 — 天气 / 时间 / 例假周期，自然融入聊天
-- 📔 心情日记 — AI 主动联系时随手记一句
+## 与原版的区别（本版本新增）
 
----
+原版的全部功能请见原仓库，这里只列出本版本新增的部分：
 
-## 🌐 需要梯子吗？—— 不需要
+- 免费托管：运行在 Cloudflare Workers 免费额度上，无需 Railway / Render / VPS，无需绑卡
+- 一键部署：点上方按钮即可部署代码
+- 24 小时在线：Cloudflare 全球边缘托管，永不休眠，无需维护服务器
+- 云端存储：对话、记忆、日记都存在 Cloudflare KV
+- 云端配置：管理页修改配置即时生效，无需重启
 
-手机只跟 Worker（Cloudflare 边缘）通信，Worker 再去请求上游 API；默认上游是国内的 DeepSeek，直连即可。
+## 一键部署教程
 
-> 唯一要求：**必须绑定自己的域名**。Cloudflare 送的 `*.workers.dev` 免费域名在中国大陆被墙，绑定一个自己的域名（us.kg 免费域名即可）就能绕开、不用梯子。
+### 准备清单
 
----
+| 需要什么 | 在哪获取 | 费用 |
+|---------|---------|------|
+| Cloudflare 账号 | https://dash.cloudflare.com | 免费 |
+| 一个域名 | 自己的，或用免费 us.kg | 免费 |
+| 上游 API Key | DeepSeek https://platform.deepseek.com 或任意 OpenAI 兼容 API | 按量付费 |
+| Bark App 与 Key | App Store 搜索 Bark | 免费 |
+| Kelivo App | App Store 搜索 Kelivo | 免费 |
 
-## 🔌 支持哪些 API？
+### 第 1 步：一键部署代码
 
-网关实现的是 OpenAI 兼容协议（`/v1/chat/completions` + `/v1/models`），**任何 OpenAI 兼容 API 都能用**：DeepSeek、Moonshot Kimi、通义 Qwen、智谱 GLM、豆包/火山方舟、硅基流动、OpenAI、Claude（OpenAI 兼容端点）、Gemini（OpenAI 兼容端点）、OpenRouter 等。
+点击上方 Deploy to Cloudflare Workers 按钮，按提示授权 GitHub 与 Cloudflare，随后会自动创建一个名为 dylan-heartbeat 的 Worker 并部署代码。
 
-只需改三个配置：`TARGET_API_URL`、`TARGET_API_KEY`、`MODEL_NAME`。
+### 第 2 步：绑定 KV 存储
 
----
+KV 命名空间的 id 是每个账号独有的，无法由按钮自动创建，需要手动绑定一次：
 
-## 🚀 快速部署
+1. 面板左侧 Workers & Pages → KV → Create a namespace，名字填 CONFIG
+2. 进入你的 Worker → Settings → Variables → 找到 KV Namespace Bindings → Add binding
+3. 变量名填 CONFIG，选择刚创建的命名空间，Save
 
-**完整步骤见 [DEPLOY_CLOUDFLARE.md](DEPLOY_CLOUDFLARE.md)**（填空式，照着填就行）。一句话流程：
+### 第 3 步：添加 Cron 定时器
 
-1. 点上方 **Deploy to Cloudflare Workers** 按钮，一键部署代码
-2. 配 KV 存储（binding 名填 `CONFIG`）+ Cron 定时器（表达式 `* * * * *`）
-3. 绑定自定义域名（不开梯子的关键）
-4. 在 Variables/Secrets 里填配置（见下方清单）
-5. Kelivo 里填域名 + `GATEWAY_API_KEY`，开聊
+1. Worker → Settings → Triggers → Cron Triggers → Add Cron Trigger
+2. 名称随意，表达式填 `* * * * *`（每分钟检查一次，代码内部会自行判断是否真的需要唤醒）
+3. Save
 
----
+### 第 4 步：配置变量
 
-## 🔑 配置清单
+Worker → Settings → Variables → Add。密码类建议用 Add secret（加密存储）。
 
-| 变量名 | 填什么 |
+| 变量名 | 填什么 | 说明 |
+|--------|--------|------|
+| TARGET_API_URL | https://api.deepseek.com/v1/chat/completions | 上游 OpenAI 兼容端点 |
+| TARGET_API_KEY | sk- 开头的 DeepSeek Key | 用 Secret 存储 |
+| MODEL_NAME | deepseek-chat | 模型名 |
+| GATEWAY_API_KEY | 自己编一长串随机字符 | Kelivo 里填这个，不是上游 Key |
+| BARK_KEY | Bark App 里的 Key | iPhone 推送 |
+| ADMIN_USER | 如 admin | 管理页用户名 |
+| ADMIN_PASSWORD | 自己定一个密码 | 管理页密码，务必设置 |
+| TIME_ZONE | Asia/Shanghai | 时区 |
+
+填完后点右上角 Deploy 重新部署，让变量生效。
+
+### 第 5 步：绑定自定义域名
+
+1. Worker → Settings → Domains & Routes → Custom Domains → Add
+2. 输入一个子域名，如 ai.你的域名.com
+3. Cloudflare 会自动配好 DNS 和证书，等状态变绿
+
+注意：必须绑定自己的域名，不能直接用 Cloudflare 默认的 *.workers.dev 地址。
+
+### 第 6 步：Kelivo 接入
+
+打开 Kelivo → 设置 → 供应商 → 添加 → 选 OpenAI：
+
+| 设置项 | 填什么 |
 |--------|--------|
-| `TARGET_API_URL` | 上游 OpenAI 兼容端点，如 `https://api.deepseek.com/v1/chat/completions` |
-| `TARGET_API_KEY` | 上游 API Key（DeepSeek 的 `sk-` 开头） |
-| `MODEL_NAME` | 模型名，如 `deepseek-chat` |
-| `GATEWAY_API_KEY` | 自己编的长随机串；Kelivo 里填这个，不是上游 Key |
-| `BARK_KEY` | Bark App 里的 Key（iPhone 推送） |
-| `ADMIN_USER` / `ADMIN_PASSWORD` | 管理页账号密码（务必设置，不能留空） |
-| `TIME_ZONE` | `Asia/Shanghai` |
+| Base URL | https://ai.你的域名.com/v1 |
+| API Key | 第 4 步的 GATEWAY_API_KEY |
+| Model | deepseek-chat |
 
-> 代码里不含任何密钥、密码、图片，全部由你部署时填入。
+点测试连通性，成功后即可开聊。
 
----
+### 验证
 
-## 📁 文件说明
+1. 在 Kelivo 里和 AI 聊几句
+2. 停止说话，AI 会在随机间隔后主动推送到手机
+3. 浏览器打开 https://ai.你的域名.com/admin（用 ADMIN_USER / ADMIN_PASSWORD 登录），可以给 AI 发消息、改配置、看日记
 
-| 路径 | 作用 |
+## 完整配置项
+
+以下变量均可在管理页或 Cloudflare Variables 里设置：
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| TARGET_API_URL | 空 | 上游 OpenAI 兼容端点 |
+| TARGET_API_KEY | 空 | 上游 API Key |
+| GATEWAY_API_KEY | 空 | 公网访问 /v1 的鉴权 Key |
+| MODEL_NAME | gateway-model | 模型名 |
+| BARK_KEY | 空 | Bark 推送 Key |
+| CUSTOM_ICON_URL | 空 | 推送图标 URL |
+| PUSH_TITLE | DeepSeek | 通知栏标题 |
+| PUSH_PROVIDER | bark | 推送渠道：bark 或 ntfy |
+| NTFY_TOPIC | 空 | ntfy 主题 |
+| DIARY_ENABLED | true | 是否保存日记 |
+| WAKE_MIN_MINUTES | 2 | 最短多久后主动联系（分钟） |
+| WAKE_MAX_MINUTES | 180 | 最长多久后主动联系（分钟） |
+| PUSH_COOLDOWN_MINUTES | 2 | 推送冷却（分钟，0 表示可连发） |
+| PERIOD_START_DATE | 空 | 上次例假开始日期，如 2026-08-01 |
+| PERIOD_CYCLE_DAYS | 28 | 例假周期天数 |
+| PERIOD_DURATION_DAYS | 5 | 经期持续天数 |
+| WEATHER_ENABLED | false | 是否注入天气 |
+| WEATHER_LAT / WEATHER_LON | 空 | 天气经纬度 |
+| TIME_ZONE | Asia/Shanghai | 时区 |
+| ADMIN_USER / ADMIN_PASSWORD | admin / 空 | 管理页账号密码 |
+
+## 常见问题
+
+| 问题 | 解决 |
 |------|------|
-| `worker.js` | Worker 单文件（核心，全部逻辑） |
-| `wrangler.toml` | CLI 部署配置 |
-| `DEPLOY_CLOUDFLARE.md` | 部署指南（填空式） |
+| Kelivo 连不上 | 检查域名绑定是否成功、Base URL 末尾是否有 /v1 |
+| AI 不发消息 | 先在 Kelivo 发一条消息建立计时；确认 Cron 定时器已添加 |
+| 手机收不到推送 | Bark 里先点推送测试；确认 BARK_KEY 填对 |
+| 想改 AI 人设 | 在 Kelivo 里改助手的人设或记忆即可，本 Worker 不会覆盖 |
+| 想清空记忆 | 在 KV 的 CONFIG namespace 里删掉 timeline 键 |
 
----
+## 许可证
 
-## 📜 许可证
-
-基于 [callie0313/dylan-heartbeat](https://github.com/callie0313/dylan-heartbeat)，沿用其 [PolyForm Noncommercial 1.0.0](LICENSE)（个人非商业使用）。详见 LICENSE。
+[PolyForm Noncommercial 1.0.0](LICENSE)，个人非商业使用。使用与再分发请遵守 LICENSE 中的署名要求。
