@@ -446,20 +446,15 @@ function randomNextWakeAt(cfg, now = new Date()) {
 // 推送指令：注入到发给 LLM 的 messages 里，让 AI 知道"用户要求发推送时输出 [PUSH]"
 const PUSH_INSTRUCTION = `\n\n【手机推送指令】当用户明确要求你发手机推送（例如"给我发消息"、"推给我"、"发个推送"、"发我手机上"）时，在回复末尾附加 [PUSH]标题|正文[/PUSH]：标题≤10字，正文≤20字，内容符合你的人设并延续当前上下文。系统会把 [PUSH]...[/PUSH] 转成手机推送并从你的回复里移除，用户看不到标记本身。不要主动加这个标记，只在用户要求时才加。`;
 
-// 对话风格指令：让 AI 不再一问一答，可以自然连续说多句（连发）
-const CHAT_STYLE_INSTRUCTION = `\n\n【对话风格·最重要】你不是一问一答的客服机器人，是像真人微信聊天。可以一次连发 2~4 句短句，每句之间用换行（回车）隔开，像连续发消息。例如对方问"在干嘛"，你可以回：
-"刚洗完澡
-头发还湿着
-你今天想我了没"
-
-要点：短句、口语、自然；不要每次都回一大段完整的话；可以主动追问、补充、撒娇；想连发几句就连发几句。`;
+// 对话风格指令：人设优先 + 自然 + 结合上下文 + 可开新话题
+const CHAT_STYLE_INSTRUCTION = `\n\n【对话风格】以你的人设和性格为最高准则，像真人聊天。不要机械的一问一答，也不要生硬地切碎句子。想多说几句就自然多说（换行分隔），想回一句就一句。顺着你们最近聊的内容往下接，也可以自然带出新的想法、分享或提问。用词、语气、句子长短都严格符合你的角色设定。`;
 
 function injectContext(messages, context) {
   const list = messages.map(m => ({ ...m }));
   const sys = list.find(m => m.role === "system");
   if (sys) {
-    // 风格/上下文指令放在 system 最前面，优先级高于人设，确保生效
-    sys.content = context + "\n\n" + normalizeContentToText(sys.content);
+    // 人设优先：把风格/上下文指令放在 system 末尾作为补充，不压过人设
+    sys.content = normalizeContentToText(sys.content) + "\n\n" + context;
   } else {
     list.unshift({ role: "system", content: context });
   }
