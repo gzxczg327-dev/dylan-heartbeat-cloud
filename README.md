@@ -93,6 +93,22 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 2. 停止说话，AI 会在随机间隔后主动推送到手机
 3. 浏览器打开 https://ai.你的域名.com/admin（用 ADMIN_USER / ADMIN_PASSWORD 登录），可以给 AI 发消息、改配置、看日记
 
+## 部署完成后：回到原项目继续
+
+到这里，Cloudflare 部署部分就完成了——你的 Worker 已经是一个可用的网关，Kelivo 也已接入。
+
+接下来的「日常使用与个性化配置」和原项目完全一致，请回到原仓库 README 继续，从下面这几节接着看：
+
+- **管理页面（Web 控制台）**：了解状态、给 AI 发消息、看日记。Cloudflare 版的管理页地址是 https://你的域名/admin（用 ADMIN_USER / ADMIN_PASSWORD 登录）。
+- **自动唤醒策略**：了解唤醒时机。注意 Cloudflare 版改用了随机间隔（WAKE_MIN_MINUTES / WAKE_MAX_MINUTES），不再使用原版的 DAY_WAKE_AFTER_MINUTES / NIGHT_WAKE_AFTER_MINUTES 白天夜间两段式。
+- **天气注入**：开启后 AI 唤醒时会带上你所在地的天气（配置项一致）。
+- **推送渠道**：Bark（iOS）与 ntfy（安卓）的配置说明（配置项一致）。
+- **自动日记**：AI 主动输出 [DIARY] 时如何保存日记。
+
+一句话总结：本移植版只替换了原 README 的「安装与配置 → 启动服务 → 配置 Kelivo」这三步（也就是"部署服务器"这一步），其余章节（管理页、唤醒策略、天气、推送、日记）全部原样适用。
+
+原项目 README：https://github.com/callie0313/dylan-heartbeat
+
 ## 完整配置项
 
 以下变量均可在管理页或 Cloudflare Variables 里设置：
