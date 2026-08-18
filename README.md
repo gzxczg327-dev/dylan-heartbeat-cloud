@@ -101,7 +101,7 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 
 1. 在 Kelivo 里和 AI 聊几句
 2. 停止说话，AI 会在随机间隔后主动推送到手机
-3. 浏览器打开 https://ai.你的域名.com/admin（用 ADMIN_USER / ADMIN_PASSWORD 登录），可以给 AI 发消息、改配置、看日记
+3. 浏览器打开 https://ai.你的域名.com/admin（用 ADMIN_USER / ADMIN_PASSWORD 登录），可以改配置、看日记
 
 ---
 
@@ -111,7 +111,7 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 
 接下来的「日常使用与个性化配置」和原项目完全一致，请回到原仓库 README 继续，从下面这几节接着看：
 
-- **管理页面（Web 控制台）** – 了解状态、给 AI 发消息、看日记。Cloudflare 版的管理页地址是 https://你的域名/admin
+- **管理页面（Web 控制台）** – 了解状态、看日记、改配置。Cloudflare 版的管理页地址是 https://你的域名/admin
 - **自动唤醒策略** – 与原版完全一致（白天/夜间阈值 + 随机化），配置项名称也相同
 - **天气注入** – 开启后 AI 唤醒时会带上你所在地的天气（配置项一致）
 - **推送渠道** – Bark（iOS）与 ntfy（安卓）的配置说明（配置项一致）
