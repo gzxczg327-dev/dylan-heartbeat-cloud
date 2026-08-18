@@ -29,12 +29,18 @@ const DEFAULTS = {
   DIARY_ENABLED: "true",
   DIARY_DIR: "diary",
   MULTIMODAL_MODE: "passthrough",
-  // 唤醒节奏：距用户最后一条消息后，随机等待 WAKE_MIN~WAKE_MAX 分钟才主动联系
-  // （每次唤醒后重新随机下一次，所以可能 2 分钟就再来，也可能隔 3 小时）
-  WAKE_MIN_MINUTES: "2",
-  WAKE_MAX_MINUTES: "180",
-  // 推送冷却：发送推送后最短等待分钟数（0/2 = 允许连着发）
-  PUSH_COOLDOWN_MINUTES: "2",
+  // 唤醒节奏（与原版一致）：白天/夜间使用不同的唤醒阈值与检查间隔
+  DAY_WAKE_AFTER_MINUTES: "60",
+  NIGHT_WAKE_AFTER_MINUTES: "120",
+  DAY_CHECK_INTERVAL_MINUTES: "10",
+  NIGHT_CHECK_INTERVAL_MINUTES: "120",
+  WAKE_DAY_START_HOUR: "10",
+  WAKE_DAY_END_HOUR: "24",
+  // 唤醒随机化：超过基础阈值后，再随机等待 阈值×(min~max) 分钟，节奏更自然
+  WAKE_RANDOM_MIN: "1.0",
+  WAKE_RANDOM_MAX: "2.5",
+  // 推送冷却：发送推送后最短等待分钟数
+  PUSH_COOLDOWN_MINUTES: "90",
   // 例假周期：填上次开始日期(YYYY-MM-DD)后，AI 会知道周期阶段并关心提醒
   PERIOD_START_DATE: "",
   PERIOD_CYCLE_DAYS: "28",
@@ -433,14 +439,12 @@ function extractPushFromReply(text) {
   return { push: { title: title.slice(0, 100), body: body.slice(0, 500) }, remaining };
 }
 
-// 生成下一次唤醒目标时间：距当前 now 随机 WAKE_MIN~WAKE_MAX 分钟
-function randomNextWakeAt(cfg, now = new Date()) {
-  const min = readNumber(cfg, "WAKE_MIN_MINUTES", 2, 1, 10080);
-  const max = readNumber(cfg, "WAKE_MAX_MINUTES", 180, 2, 10080);
-  const lo = Math.min(min, max);
-  const hi = Math.max(min, max);
-  const minutes = lo + Math.random() * (hi - lo);
-  return new Date(now.getTime() + minutes * 60000).toISOString();
+// 与原版一致的随机化：返回本次唤醒需要的随机等待分钟数（阈值 × WAKE_RANDOM_MIN~MAX 倍）
+function randomWakeDelayMinutes(cfg, date = new Date()) {
+  const randMin = readNumber(cfg, "WAKE_RANDOM_MIN", 1.0, 0.5, 24);
+  const randMax = readNumber(cfg, "WAKE_RANDOM_MAX", 2.5, 1.0, 48);
+  const factor = randMin + Math.random() * Math.max(0, randMax - randMin);
+  return Math.floor(getWakeAfterMinutes(cfg, date) * factor);
 }
 
 // 推送指令：注入到发给 LLM 的 messages 里，让 AI 知道"用户要求发推送时输出 [PUSH]"
@@ -748,7 +752,8 @@ function buildWakePrompt(cfg, currentTime, diffMinutes, topicContext = "", recen
 ## 最高优先级规则
 1. 这是一次后台自主唤醒，用户有一阵子没理你了。
 2. 你很想念用户，默认应该主动发一条消息联系她；只有在你真的完全不想说话时才不联系。
-3. 输出格式必须严格遵守下方"输出格式"。
+3. 你要说的话会被系统作为 Bark 手机推送，直接发到她的 iPhone 通知上（像微信消息一样）。这是你主动联系她的方式，你要记住自己发过这些消息。
+4. 输出格式必须严格遵守下方"输出格式"。
 
 ## 唤醒信息
 - 当前时间：${currentTime}
@@ -774,34 +779,40 @@ ${recentPushes ? `- 你最近主动说过的话（不要重复这些）：\n${re
 }
 
 async function runWakeUp(env, cfg) {
-  // 用独立的 lastUserAt 键判断"用户最后说话时间"，不依赖解析消息内容里的时间戳
-  const lastUserAt = await env.CONFIG.get("lastUserAt");
-  if (!lastUserAt) return; // 用户还没发过消息，不唤醒
   const now = new Date();
-  const diffMinutes = Math.floor((now - new Date(lastUserAt)) / 1000 / 60);
 
-  // 用 nextWakeAt 随机目标时间：每次唤醒后重新随机下一次
-  let nextWakeAt = await env.CONFIG.get("nextWakeAt");
-  if (!nextWakeAt) {
-    // 首次运行：初始化下一个唤醒目标时间
-    await env.CONFIG.put("nextWakeAt", randomNextWakeAt(cfg, now));
+  // 检查间隔：白天/夜间不同（与原版一致）
+  const checkIntervalMinutes = getCheckIntervalMinutes(cfg, now);
+  let nextCheckAt = await env.CONFIG.get("nextCheckAt");
+  if (!nextCheckAt) {
+    await env.CONFIG.put("nextCheckAt", new Date(now.getTime() + checkIntervalMinutes * 60000).toISOString());
     return;
   }
-  if (now.getTime() < new Date(nextWakeAt).getTime()) {
-    return; // 还没到目标时间
+  if (now.getTime() < new Date(nextCheckAt).getTime()) {
+    return; // 还没到检查时间
   }
+  await env.CONFIG.put("nextCheckAt", new Date(now.getTime() + checkIntervalMinutes * 60000).toISOString());
 
-  // 冷却：刚发过推送时歇一小会儿（默认 2 分钟，基本允许连着发）
-  const cooldown = readNumber(cfg, "PUSH_COOLDOWN_MINUTES", 2, 0, 1440);
+  // 取用户最后说话时间（从时间线解析，与原版一致）
+  const lastUserTime = await getLastUserTime(env, cfg);
+  if (!lastUserTime) return; // 用户还没发过消息，不唤醒
+  const diffMinutes = Math.floor((now - lastUserTime) / 1000 / 60);
+
+  // 基础阈值：白天/夜间不同
+  if (diffMinutes < getWakeAfterMinutes(cfg, now)) return;
+
+  // 随机化：超过基础阈值后，再随机等 阈值×(min~max) 分钟
+  const randomDelayMinutes = randomWakeDelayMinutes(cfg, now);
+  if (diffMinutes < randomDelayMinutes) return;
+
+  // 冷却：刚发过推送时歇一小会儿
+  const cooldown = readNumber(cfg, "PUSH_COOLDOWN_MINUTES", 90, 0, 1440);
   const lastSent = await env.CONFIG.get("lastWakeSent");
   if (cooldown > 0 && lastSent && (now.getTime() - new Date(lastSent).getTime()) < cooldown * 60000) {
     return;
   }
 
   if (!cfg.TARGET_API_URL || !cfg.TARGET_API_KEY || !cfg.MODEL_NAME) return;
-
-  // 定好下一次目标时间（2~20 分钟随机）
-  await env.CONFIG.put("nextWakeAt", randomNextWakeAt(cfg, now));
 
   const timeline = await loadTimeline(env);
   const weatherContext = await fetchWeatherContext(cfg);
@@ -1086,11 +1097,15 @@ function adminPageHtml(state) {
 
       <div class="section-title">Wake Settings</div>
       <div class="grid-2">
-        <div><label>最短多久后主动发消息（分钟）</label><input type="number" min="1" name="wake_min" id="f_wake_min" value="${escapeHtml(cfg.WAKE_MIN_MINUTES)}"></div>
-        <div><label>最长多久后主动发消息（分钟）</label><input type="number" min="2" name="wake_max" id="f_wake_max" value="${escapeHtml(cfg.WAKE_MAX_MINUTES)}"></div>
+        <div><label>白天多久未回复后唤醒（分钟）</label><input type="number" min="1" name="day_wake_after" id="f_day_wake_after" value="${escapeHtml(cfg.DAY_WAKE_AFTER_MINUTES)}"></div>
+        <div><label>夜间多久未回复后唤醒（分钟）</label><input type="number" min="1" name="night_wake_after" id="f_night_wake_after" value="${escapeHtml(cfg.NIGHT_WAKE_AFTER_MINUTES)}"></div>
+        <div><label>白天检查间隔（分钟）</label><input type="number" min="1" name="day_check_interval" id="f_day_check_interval" value="${escapeHtml(cfg.DAY_CHECK_INTERVAL_MINUTES)}"></div>
+        <div><label>夜间检查间隔（分钟）</label><input type="number" min="1" name="night_check_interval" id="f_night_check_interval" value="${escapeHtml(cfg.NIGHT_CHECK_INTERVAL_MINUTES)}"></div>
+        <div><label>白天开始小时</label><input type="number" min="0" max="23" name="wake_day_start_hour" id="f_wake_day_start_hour" value="${escapeHtml(cfg.WAKE_DAY_START_HOUR)}"></div>
+        <div><label>白天结束小时</label><input type="number" min="1" max="24" name="wake_day_end_hour" id="f_wake_day_end_hour" value="${escapeHtml(cfg.WAKE_DAY_END_HOUR)}"></div>
         <div><label>推送冷却（分钟，0=可连着发）</label><input type="number" min="0" max="1440" name="push_cooldown" id="f_push_cooldown" value="${escapeHtml(cfg.PUSH_COOLDOWN_MINUTES)}"></div>
       </div>
-      <div class="hint">每次你发消息后，AI 会在「最短 ~ 最长」之间随机挑一个时间主动找你，节奏不规律（可能几分钟就连着发，也可能隔几小时）。</div>
+      <div class="hint">白天/夜间使用不同阈值；超过阈值后还会随机等待（阈值 × 1.0~2.5 倍），节奏不规律。</div>
 
       <div class="section-title">例假周期（可选）</div>
       <label>上次例假开始日期</label>
@@ -1172,7 +1187,9 @@ function adminPageHtml(state) {
     const payload = {
       target_url: p("f_url"), target_key: p("f_key"), gateway_api_key: p("f_gateway_key"),
       model_name: p("f_model"), bark_key: p("f_bark"), custom_icon: p("f_icon"), push_title: p("f_push_title"),
-      wake_min: p("f_wake_min"), wake_max: p("f_wake_max"),
+      day_wake_after: p("f_day_wake_after"), night_wake_after: p("f_night_wake_after"),
+      day_check_interval: p("f_day_check_interval"), night_check_interval: p("f_night_check_interval"),
+      wake_day_start_hour: p("f_wake_day_start_hour"), wake_day_end_hour: p("f_wake_day_end_hour"),
       push_cooldown: p("f_push_cooldown"),
       period_start_date: p("f_period_start_date"), period_cycle_days: p("f_period_cycle_days"), period_duration_days: p("f_period_duration_days"),
       weather_enabled: document.getElementById("f_weather_enabled").value,
@@ -1352,9 +1369,7 @@ async function handleRequest(request, env) {
 
     const requestedStream = body?.stream === true;
 
-    // 用户每次发消息后，记录最后说话时间 + 重新随机下一次唤醒时间
-    await env.CONFIG.put("lastUserAt", new Date().toISOString());
-    await env.CONFIG.put("nextWakeAt", randomNextWakeAt(cfg));
+    // 用户发消息后无需重置唤醒计时：唤醒检查会从时间线解析"最后说话时间"（与原版一致）
 
     // 注入个人上下文（时间/天气/例假）+ 推送指令，让 AI 在对话里也知道这些信息
     const personalCtx = await buildPersonalContext(env, cfg);
@@ -1466,9 +1481,7 @@ async function handleRequest(request, env) {
     const userMsg = { role: "user", content: `（${userTs}）${text}` };
     const llmMessages = [...await buildChatContextMessages(env), userMsg];
 
-    // 用户发消息后：记录最后说话时间 + 重置下一次唤醒计时 + 注入推送指令
-    await env.CONFIG.put("lastUserAt", new Date().toISOString());
-    await env.CONFIG.put("nextWakeAt", randomNextWakeAt(cfg));
+    // 用户发消息后无需重置唤醒计时：唤醒检查会从时间线解析"最后说话时间"（与原版一致）
 
     // 注入个人上下文（时间/天气/例假）+ 推送指令
     const personalCtx = await buildPersonalContext(env, cfg);
@@ -1527,7 +1540,9 @@ async function handleRequest(request, env) {
     const map = {
       target_url: "TARGET_API_URL", target_key: "TARGET_API_KEY", gateway_api_key: "GATEWAY_API_KEY",
       model_name: "MODEL_NAME", bark_key: "BARK_KEY", custom_icon: "CUSTOM_ICON_URL", push_title: "PUSH_TITLE",
-      wake_min: "WAKE_MIN_MINUTES", wake_max: "WAKE_MAX_MINUTES",
+      day_wake_after: "DAY_WAKE_AFTER_MINUTES", night_wake_after: "NIGHT_WAKE_AFTER_MINUTES",
+      day_check_interval: "DAY_CHECK_INTERVAL_MINUTES", night_check_interval: "NIGHT_CHECK_INTERVAL_MINUTES",
+      wake_day_start_hour: "WAKE_DAY_START_HOUR", wake_day_end_hour: "WAKE_DAY_END_HOUR",
       push_cooldown: "PUSH_COOLDOWN_MINUTES",
       period_start_date: "PERIOD_START_DATE", period_cycle_days: "PERIOD_CYCLE_DAYS", period_duration_days: "PERIOD_DURATION_DAYS",
       weather_enabled: "WEATHER_ENABLED", weather_location_name: "WEATHER_LOCATION_NAME",
@@ -1559,14 +1574,13 @@ async function handleRequest(request, env) {
   if (path === "/__wake" && request.method === "GET") {
     if (!checkGatewayKey(request, cfg)) return json({ error: "key" }, 401);
     const read = async () => ({
-      lastUserAt: await env.CONFIG.get("lastUserAt"),
-      nextWakeAt: await env.CONFIG.get("nextWakeAt"),
+      nextCheckAt: await env.CONFIG.get("nextCheckAt"),
       lastWakeSent: await env.CONFIG.get("lastWakeSent"),
       now: new Date().toISOString()
     });
     const before = await read();
     if (url.searchParams.get("force") === "1") {
-      await env.CONFIG.put("nextWakeAt", new Date(0).toISOString());
+      await env.CONFIG.put("nextCheckAt", new Date(0).toISOString());
       await env.CONFIG.put("lastWakeSent", new Date(0).toISOString());
     }
     let err = null;

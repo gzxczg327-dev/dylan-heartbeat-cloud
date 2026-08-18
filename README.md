@@ -115,7 +115,7 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 接下来的「日常使用与个性化配置」和原项目完全一致，请回到原仓库 README 继续，从下面这几节接着看：
 
 - **管理页面（Web 控制台）** – 了解状态、给 AI 发消息、看日记。Cloudflare 版的管理页地址是 https://你的域名/admin
-- **自动唤醒策略** – 了解唤醒时机。注意 Cloudflare 版改用了随机间隔（WAKE_MIN_MINUTES / WAKE_MAX_MINUTES），不再使用原版的 DAY_WAKE_AFTER_MINUTES / NIGHT_WAKE_AFTER_MINUTES 白天夜间两段式
+- **自动唤醒策略** – 与原版完全一致（白天/夜间阈值 + 随机化），配置项名称也相同
 - **天气注入** – 开启后 AI 唤醒时会带上你所在地的天气（配置项一致）
 - **推送渠道** – Bark（iOS）与 ntfy（安卓）的配置说明（配置项一致）
 - **自动日记** – AI 主动输出 [DIARY] 时如何保存日记
@@ -142,9 +142,14 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 | PUSH_PROVIDER | bark | 推送渠道：bark 或 ntfy |
 | NTFY_TOPIC | 空 | ntfy 主题 |
 | DIARY_ENABLED | true | 是否保存日记 |
-| WAKE_MIN_MINUTES | 2 | 最短多久后主动联系（分钟） |
-| WAKE_MAX_MINUTES | 180 | 最长多久后主动联系（分钟） |
-| PUSH_COOLDOWN_MINUTES | 2 | 推送冷却（分钟，0 表示可连发） |
+| DAY_WAKE_AFTER_MINUTES | 60 | 白天多久未回复后唤醒（分钟） |
+| NIGHT_WAKE_AFTER_MINUTES | 120 | 夜间多久未回复后唤醒（分钟） |
+| DAY_CHECK_INTERVAL_MINUTES | 10 | 白天检查间隔（分钟） |
+| NIGHT_CHECK_INTERVAL_MINUTES | 120 | 夜间检查间隔（分钟） |
+| WAKE_DAY_START_HOUR | 10 | 白天开始小时 |
+| WAKE_DAY_END_HOUR | 24 | 白天结束小时 |
+| WAKE_RANDOM_MIN / WAKE_RANDOM_MAX | 1.0 / 2.5 | 唤醒随机化倍数 |
+| PUSH_COOLDOWN_MINUTES | 90 | 推送冷却（分钟，0 表示可连发） |
 | PERIOD_START_DATE | 空 | 上次例假开始日期，如 2026-08-01 |
 | PERIOD_CYCLE_DAYS | 28 | 例假周期天数 |
 | PERIOD_DURATION_DAYS | 5 | 经期持续天数 |
