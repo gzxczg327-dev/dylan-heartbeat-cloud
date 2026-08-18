@@ -1,7 +1,7 @@
 # Dylan Heartbeat — Cloud
 
 **一个给 Kelivo AI 伴侣使用的免费云端版。**  
-把原项目从「需要付费的 Node 服务器」搬到「永久免费的 Cloudflare Workers」，保留原项目的全部核心设计。
+把原项目从「需要付费的服务器」搬到「永久免费的 Cloudflare Workers」，保留原项目的全部核心设计。
 
 > [!IMPORTANT]
 > **基于 [callie0313/dylan-heartbeat](https://github.com/callie0313/dylan-heartbeat) 移植，沿用其 [PolyForm Noncommercial License 1.0.0](LICENSE)。仅授权个人非商业使用，禁止付费代部署及任何商业用途。** 核心设计与署名均来自原作者 Callie，本仓库只改写了运行平台。
@@ -10,25 +10,22 @@
 
 ---
 
-## 💐 致敬原作者
+## 致敬原作者
 
-本项目的核心设计 —— 主动唤醒、时间线记忆、推送机制 —— 全部来自 [callie0313/dylan-heartbeat](https://github.com/callie0313/dylan-heartbeat)，作者 Callie。本仓库没有改动任何核心逻辑，只做了一件事：把运行方式从付费服务器改写为 Cloudflare Workers，让更多人能零成本使用。感谢原作者的开放与贡献。
+本项目的核心设计 —— 主动唤醒、时间线记忆、推送机制 —— 全部来自 [callie0313/dylan-heartbeat](https://github.com/callie0313/dylan-heartbeat)，作者空气小狗。本仓库没有改动任何核心逻辑，只把运行方式从付费服务器改写为 Cloudflare Workers，让更多人能零成本使用。感谢原作者的开放与贡献。
 
 ---
 
-## ✨ 与原版的区别（本版本新增）
+## 与原版的区别（本版本新增）
 
 原版的全部功能请见原仓库，这里只列出本版本新增的部分：
 
-- 🆓 **免费托管** – 运行在 Cloudflare Workers 免费额度上，无需 Railway / Render / VPS，无需绑卡
-- ⚡ **一键部署** – 点下方按钮即可部署代码
-- 🌍 **24 小时在线** – Cloudflare 全球边缘托管，永不休眠，无需维护服务器
-- ☁️ **云端存储** – 对话、记忆、日记都存在 Cloudflare KV
-- 🎛️ **云端配置** – 管理页修改配置即时生效，无需重启
+-  **免费托管** – 运行在 Cloudflare Workers 免费额度上，无需 Railway / Render / VPS，无需绑卡
+-  **一键部署** – 点下方按钮即可部署代码
 
 ---
 
-## 🎒 准备清单
+##  准备清单
 
 | 需要什么 | 在哪获取 | 费用 |
 |---------|---------|------|
@@ -40,7 +37,7 @@
 
 ---
 
-## 🚀 一键部署教程
+##  一键部署教程
 
 ### 第 1 步：一键部署代码
 
@@ -108,7 +105,7 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 
 ---
 
-## 🔗 部署完成后回到原项目继续
+##  部署完成后回到原项目继续
 
 到这里，Cloudflare 部署部分就完成了——你的 Worker 已经是一个可用的网关，Kelivo 也已接入。
 
@@ -124,43 +121,10 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 
 原项目 README：https://github.com/callie0313/dylan-heartbeat
 
----
-
-## ⚙️ 完整配置项
-
-以下变量均可在管理页或 Cloudflare Variables 里设置：
-
-| 变量名 | 默认值 | 说明 |
-|--------|--------|------|
-| TARGET_API_URL | 空 | 上游 OpenAI 兼容端点 |
-| TARGET_API_KEY | 空 | 上游 API Key |
-| GATEWAY_API_KEY | 空 | 公网访问 /v1 的鉴权 Key |
-| MODEL_NAME | gateway-model | 模型名 |
-| BARK_KEY | 空 | Bark 推送 Key |
-| CUSTOM_ICON_URL | 空 | 推送图标 URL |
-| PUSH_TITLE | DeepSeek | 通知栏标题 |
-| PUSH_PROVIDER | bark | 推送渠道：bark 或 ntfy |
-| NTFY_TOPIC | 空 | ntfy 主题 |
-| DIARY_ENABLED | true | 是否保存日记 |
-| DAY_WAKE_AFTER_MINUTES | 60 | 白天多久未回复后唤醒（分钟） |
-| NIGHT_WAKE_AFTER_MINUTES | 120 | 夜间多久未回复后唤醒（分钟） |
-| DAY_CHECK_INTERVAL_MINUTES | 10 | 白天检查间隔（分钟） |
-| NIGHT_CHECK_INTERVAL_MINUTES | 120 | 夜间检查间隔（分钟） |
-| WAKE_DAY_START_HOUR | 10 | 白天开始小时 |
-| WAKE_DAY_END_HOUR | 24 | 白天结束小时 |
-| WAKE_RANDOM_MIN / WAKE_RANDOM_MAX | 1.0 / 2.5 | 唤醒随机化倍数 |
-| PUSH_COOLDOWN_MINUTES | 90 | 推送冷却（分钟，0 表示可连发） |
-| PERIOD_START_DATE | 空 | 上次例假开始日期，如 2026-08-01 |
-| PERIOD_CYCLE_DAYS | 28 | 例假周期天数 |
-| PERIOD_DURATION_DAYS | 5 | 经期持续天数 |
-| WEATHER_ENABLED | false | 是否注入天气 |
-| WEATHER_LAT / WEATHER_LON | 空 | 天气经纬度 |
-| TIME_ZONE | Asia/Shanghai | 时区 |
-| ADMIN_USER / ADMIN_PASSWORD | admin / 空 | 管理页账号密码 |
 
 ---
 
-## ❓ 常见问题
+##  常见问题
 
 | 问题 | 解决 |
 |------|------|
@@ -172,6 +136,6 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 
 ---
 
-## 📜 许可证
+##  许可证
 
 [PolyForm Noncommercial 1.0.0](LICENSE)，个人非商业使用。使用与再分发请遵守 LICENSE 中的署名要求。
