@@ -4,11 +4,11 @@
 //
 // 功能与原 Node 版一致：
 //   - /v1/chat/completions、/v1/models（Kelivo 接入）
-//   - /admin 管理页 + 聊天面板（给 AI 发消息）
+//   - /admin 管理页（状态 / 日记 / 预设 / 配置，与原版一致）
 //   - Cron 定时自动唤醒，AI 自主决定是否推送 Bark/ntfy 到手机
 //   - 时间线 / 日记 / 配置 存 Workers KV
 //
-// 部署方式见 worker/DEPLOY_CLOUDFLARE.md
+// 部署方式见 README.md
 // ============================================================
 
 // ---------- 默认配置（对应 .env.example） ----------
@@ -117,6 +117,14 @@ async function kvGetJson(kv, key, fallback) {
 
 async function kvPutJson(kv, key, value) {
   await kv.put(key, JSON.stringify(value));
+}
+
+async function loadPresets(env) {
+  return kvGetJson(env.CONFIG, "presets", []);
+}
+
+async function savePresets(env, presets) {
+  await kvPutJson(env.CONFIG, "presets", presets);
 }
 
 // ---------- 消息处理（移植自 server.js） ----------
@@ -982,242 +990,703 @@ async function buildChatContextMessages(env) {
 
 
 // ---------- 管理页 HTML ----------
+// ---------- 管理页 HTML（与原版一致） ----------
 function adminPageHtml(state) {
-  const { cfg, lastWakeText, diaryHtml, authHeaderJson } = state;
-  const gatewayKeyStatus = cfg.GATEWAY_API_KEY ? "已配置" : "未配置";
-  const pushAvailable = !!(cfg.BARK_KEY || cfg.NTFY_TOPIC);
   return `<!DOCTYPE html>
 <html lang="zh">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HEARTBEAT · Cloud</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: "Noto Serif SC", Georgia, "Times New Roman", serif;
-    background: linear-gradient(135deg, #f8f0f3 0%, #f5e6eb 100%);
-    min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 30px 20px;
-  }
-  .container {
-    max-width: 520px; width: 100%;
-    background: rgba(255,255,255,0.75); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
-    border-radius: 24px; padding: 40px 32px;
-    box-shadow: 0 2px 10px rgba(180,120,130,0.05), 0 15px 40px rgba(180,120,130,0.15), 0 0 0 1px rgba(255,255,255,0.8) inset;
-    animation: fadeIn 0.6s ease-out;
-  }
-  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-  h2 { text-align: center; font-size: 32px; font-weight: 700; color: #8a4a58; margin-bottom: 4px; letter-spacing: 6px; font-family: "Times New Roman", Georgia, "Noto Serif SC", serif; text-transform: uppercase; }
-  .subtitle { text-align: center; font-size: 12px; color: #a87a85; margin-bottom: 24px; letter-spacing: 4px; text-transform: uppercase; font-style: italic; opacity: 0.85; }
-  .status { background: rgba(255,250,252,0.6); border-radius: 14px; padding: 14px 20px; margin-bottom: 20px; border: 1px solid rgba(230,200,208,0.4); }
-  .status p { margin: 6px 0; font-size: 13px; color: #6d5057; line-height: 1.5; text-transform: uppercase; letter-spacing: 1px; }
-  .status strong { color: #8a4a58; font-weight: 600; }
-  .chat-box, .config-box, .diary-box { background: rgba(255,250,252,0.5); border-radius: 16px; padding: 20px; margin-bottom: 20px; border: 1px solid rgba(230,200,208,0.3); }
-  .chat-box h3, .config-box h3, .diary-box h3 { margin: 0 0 14px; font-size: 12px; color: #8a4a58; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; }
-  .chat-messages { max-height: 300px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px 10px; }
-  .chat-empty { color: #9a7a82; font-size: 12px; font-style: italic; text-align: center; padding: 14px 0; }
-  .chat-bubble { max-width: 85%; padding: 10px 14px; border-radius: 14px; font-size: 13px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; animation: fadeIn 0.3s ease-out; }
-  .chat-bubble .chat-time { display: block; font-size: 10px; opacity: 0.65; margin-top: 4px; font-style: italic; }
-  .chat-bubble.user { align-self: flex-end; background: linear-gradient(135deg,#d8a0ad 0%,#c8909d 100%); color: white; border-bottom-right-radius: 4px; }
-  .chat-bubble.ai { align-self: flex-start; background: rgba(255,255,255,0.85); color: #5a4046; border: 1px solid rgba(220,180,190,0.35); border-bottom-left-radius: 4px; }
-  .chat-bubble.ai.proactive { background: rgba(240, 230, 235, 0.9); border-style: dashed; }
-  .chat-tag { display: inline-block; font-size: 9px; color: #a85a68; background: rgba(216,160,173,0.18); border: 1px solid rgba(216,160,173,0.4); border-radius: 6px; padding: 1px 6px; margin-right: 6px; vertical-align: middle; letter-spacing: 1px; }
-  .chat-input-row { display: flex; gap: 10px; align-items: stretch; }
-  .chat-input-row textarea { flex: 1; resize: vertical; min-height: 56px; font-family: "Noto Serif SC", serif; font-size: 13px; color: #5a4046; border: 1px solid rgba(200,160,170,0.3); border-radius: 10px; padding: 10px 14px; background: rgba(255,255,255,0.7); }
-  .chat-input-row textarea:focus { outline: none; border-color: #c89aa6; box-shadow: 0 0 0 3px rgba(200,154,166,0.1); }
-  button.chat-send { width: auto; min-width: 76px; margin-top: 0; padding: 10px 18px; border: none; border-radius: 10px; font-size: 13px; font-weight: 500; cursor: pointer; font-family: "Noto Serif SC", serif; background: linear-gradient(135deg,#d8a0ad 0%,#c8909d 100%); color: white; box-shadow: 0 4px 12px rgba(180,120,130,0.2); }
-  button.chat-send:hover { background: linear-gradient(135deg,#c8909d 0%,#b8808d 100%); }
-  button.chat-send:disabled { opacity: 0.6; cursor: not-allowed; }
-  .chat-opt { display: block; margin-top: 10px; font-size: 11px; color: #8b6b72; cursor: pointer; }
-  .chat-opt input { width: auto; margin: 0 6px 0 0; }
-  .chat-typing { align-self: flex-start; font-size: 12px; color: #9a7a82; font-style: italic; padding: 6px 2px; }
-  .hint { margin-top: 8px; font-size: 11px; color: #9a7a82; line-height: 1.6; }
-  label { display: block; margin-top: 14px; font-weight: 500; font-size: 11px; color: #8b6b72; letter-spacing: 1.5px; text-transform: uppercase; }
-  input, select { width: 100%; padding: 10px 14px; margin-top: 6px; border: 1px solid rgba(200,160,170,0.3); border-radius: 10px; background: rgba(255,255,255,0.7); font-family: "Noto Serif SC", serif; font-size: 13px; color: #5a4046; }
-  input:focus, select:focus { outline: none; border-color: #c89aa6; box-shadow: 0 0 0 3px rgba(200,154,166,0.1); }
-  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .section-title { margin-top: 20px; padding-top: 16px; border-top: 1px solid rgba(220,180,190,0.3); font-size: 12px; color: #8a4a58; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; }
-  button.save { width: 100%; margin-top: 16px; padding: 12px; border: none; border-radius: 10px; font-size: 13px; font-weight: 500; cursor: pointer; font-family: "Noto Serif SC", serif; letter-spacing: 1.5px; background: linear-gradient(135deg,#d8a0ad 0%,#c8909d 100%); color: white; box-shadow: 0 4px 12px rgba(180,120,130,0.2); }
-  button.save:hover { background: linear-gradient(135deg,#c8909d 0%,#b8808d 100%); }
-  .diary-entry { border: 1px solid rgba(220,180,190,0.3); border-radius: 12px; background: rgba(255,255,255,0.58); margin-top: 10px; overflow: hidden; }
-  .diary-entry summary { cursor: pointer; padding: 12px 14px; color: #6d5057; font-size: 13px; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
-  .diary-entry summary span { font-weight: 600; }
-  .diary-entry summary em { color: #a88a92; font-style: normal; font-size: 10px; white-space: nowrap; }
-  .diary-entry pre { white-space: pre-wrap; word-break: break-word; margin: 0; padding: 0 14px 14px; color: #5a4046; font-family: "Noto Serif SC", Georgia, "Times New Roman", serif; font-size: 12px; line-height: 1.8; max-height: 360px; overflow: auto; }
-  .diary-empty { color: #9a7a82; font-size: 12px; line-height: 1.7; background: rgba(255,255,255,0.55); border-radius: 12px; padding: 12px 14px; }
-  .note { margin-top: 14px; font-size: 10px; color: #a88a92; text-align: center; font-style: italic; letter-spacing: 1px; opacity: 0.7; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HEARTBEAT · Runtime</title>
+  <!-- 引入思源宋体 -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    body {
+      font-family: "Noto Serif SC", Georgia, "Times New Roman", serif;
+      background: linear-gradient(135deg, #f8f0f3 0%, #f5e6eb 100%);
+      background-image: 
+        radial-gradient(circle at 20% 80%, rgba(230, 190, 200, 0.15) 0%, transparent 50%),
+        radial-gradient(circle at 80% 20%, rgba(210, 170, 180, 0.1) 0%, transparent 50%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 30px 20px;
+    }
+
+    .container {
+      max-width: 480px;
+      width: 100%;
+      background: rgba(255, 255, 255, 0.75);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border-radius: 24px;
+      padding: 40px 32px;
+      box-shadow: 
+        0 2px 10px rgba(180, 120, 130, 0.05),
+        0 15px 40px rgba(180, 120, 130, 0.15),
+        0 0 0 1px rgba(255, 255, 255, 0.8) inset;
+      transition: all 0.4s ease;
+    }
+
+    .container:hover {
+      box-shadow: 
+        0 2px 10px rgba(180, 120, 130, 0.08),
+        0 20px 50px rgba(180, 120, 130, 0.2),
+        0 0 0 1px rgba(255, 255, 255, 0.9) inset;
+    }
+
+    h2 {
+      text-align: center;
+      font-size: 32px;
+      font-weight: 700;
+      color: #8a4a58;
+      margin-bottom: 4px;
+      letter-spacing: 6px;
+      font-family: "Times New Roman", "Georgia", "Noto Serif SC", serif;
+      font-style: normal;
+      text-transform: uppercase;
+    }
+
+    .subtitle {
+      text-align: center;
+      font-size: 12px;
+      color: #a87a85;
+      margin-bottom: 32px;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      font-style: italic;
+      opacity: 0.85;
+    }
+
+    .status {
+      background: rgba(255, 250, 252, 0.6);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-radius: 14px;
+      padding: 16px 20px;
+      margin-bottom: 24px;
+      border: 1px solid rgba(230, 200, 208, 0.4);
+    }
+
+    .status p {
+      margin: 6px 0;
+      font-size: 13px;
+      color: #6d5057;
+      font-weight: 400;
+      line-height: 1.5;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .status strong {
+      color: #8a4a58;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+
+    label {
+      display: block;
+      margin-top: 16px;
+      font-weight: 500;
+      font-size: 11px;
+      color: #8b6b72;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    input {
+      width: 100%;
+      padding: 10px 14px;
+      margin-top: 6px;
+      border: 1px solid rgba(200, 160, 170, 0.3);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.7);
+      font-family: "Noto Serif SC", serif;
+      font-size: 13px;
+      color: #5a4046;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #c89aa6;
+      box-shadow: 0 0 0 3px rgba(200, 154, 166, 0.1);
+      background: rgba(255, 255, 255, 0.95);
+      transform: translateY(-1px);
+    }
+
+    input::placeholder {
+      color: #b8a0a6;
+      font-style: italic;
+      font-size: 12px;
+    }
+
+    select {
+      width: 100%;
+      padding: 10px 14px;
+      margin-top: 6px;
+      border: 1px solid rgba(200, 160, 170, 0.3);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.7);
+      font-family: "Noto Serif SC", serif;
+      font-size: 13px;
+      color: #5a4046;
+    }
+
+    button {
+      width: 100%;
+      margin-top: 16px;
+      padding: 12px;
+      border: none;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      letter-spacing: 1.5px;
+      font-family: "Noto Serif SC", serif;
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      text-transform: uppercase;
+    }
+
+    button.save {
+      background: linear-gradient(135deg, #d8a0ad 0%, #c8909d 100%);
+      color: white;
+      box-shadow: 0 4px 12px rgba(180, 120, 130, 0.2);
+    }
+
+    button.save:hover {
+      background: linear-gradient(135deg, #c8909d 0%, #b8808d 100%);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(180, 120, 130, 0.3);
+    }
+
+    button.save:active {
+      transform: translateY(0);
+      box-shadow: 0 2px 8px rgba(180, 120, 130, 0.2);
+    }
+
+    button.restart {
+      background: linear-gradient(135deg, #e8909d 0%, #d8808d 100%);
+      color: white;
+      box-shadow: 0 4px 12px rgba(200, 100, 120, 0.25);
+      margin-top: 28px;
+    }
+
+    button.restart:hover {
+      background: linear-gradient(135deg, #d8808d 0%, #c8707d 100%);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(200, 100, 120, 0.35);
+    }
+
+    button.restart:active {
+      transform: translateY(0);
+      box-shadow: 0 2px 8px rgba(200, 100, 120, 0.25);
+    }
+
+    .note {
+      margin-top: 16px;
+      font-size: 10px;
+      color: #a88a92;
+      text-align: center;
+      font-style: italic;
+      letter-spacing: 1px;
+      opacity: 0.7;
+    }
+
+    /* 预设区域 */
+    .presets-box {
+      background: rgba(255, 250, 252, 0.5);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 24px;
+      border: 1px solid rgba(230, 200, 208, 0.3);
+    }
+
+    .presets-box h3 {
+      margin: 0 0 14px 0;
+      font-size: 12px;
+      color: #8a4a58;
+      font-weight: 500;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    .preset-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .preset-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .preset-btn {
+      flex: 1;
+      padding: 10px 14px;
+      background: rgba(255, 255, 255, 0.7);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      border: 1px solid rgba(220, 180, 190, 0.3);
+      border-radius: 10px;
+      text-align: left;
+      font-size: 13px;
+      color: #6d5057;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      font-family: "Noto Serif SC", serif;
+    }
+
+    .preset-btn:hover {
+      background: rgba(255, 245, 248, 0.9);
+      border-color: #c89aa6;
+      box-shadow: 0 4px 12px rgba(180, 120, 130, 0.15);
+      transform: translateY(-1px);
+    }
+
+    .preset-btn span {
+      color: #9a7a82;
+      font-size: 11px;
+      margin-left: 8px;
+      font-style: italic;
+    }
+
+    .preset-del {
+      padding: 8px 12px;
+      background: rgba(255, 240, 243, 0.6);
+      border: 1px solid rgba(240, 200, 210, 0.4);
+      border-radius: 8px;
+      font-size: 11px;
+      color: #a85a68;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .preset-del:hover {
+      background: rgba(255, 230, 235, 0.8);
+      border-color: #e8a0b0;
+      color: #9a4a58;
+    }
+
+    .add-preset {
+      border-top: 1px solid rgba(220, 180, 190, 0.3);
+      padding-top: 16px;
+    }
+
+    .add-preset strong {
+      font-size: 11px;
+      color: #8a4a58;
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 500;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    .add-preset input {
+      margin-top: 6px;
+      background: rgba(255, 255, 255, 0.8);
+    }
+
+    .add-preset button {
+      background: linear-gradient(135deg, #c89aa6 0%, #b88a96 100%);
+      color: white;
+      box-shadow: 0 4px 10px rgba(160, 100, 110, 0.2);
+      font-size: 12px;
+      padding: 10px;
+    }
+
+    .add-preset button:hover {
+      background: linear-gradient(135deg, #b88a96 0%, #a87a86 100%);
+    }
+
+    .config-box {
+      background: rgba(255, 250, 252, 0.5);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-radius: 16px;
+      padding: 20px;
+      border: 1px solid rgba(230, 200, 208, 0.3);
+    }
+
+    .diary-box {
+      background: rgba(255, 250, 252, 0.5);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 24px;
+      border: 1px solid rgba(230, 200, 208, 0.3);
+    }
+
+    .diary-box h3 {
+      margin: 0 0 12px 0;
+      font-size: 12px;
+      color: #8a4a58;
+      font-weight: 600;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    .diary-entry {
+      border: 1px solid rgba(220, 180, 190, 0.3);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.58);
+      margin-top: 10px;
+      overflow: hidden;
+    }
+
+    .diary-entry summary {
+      cursor: pointer;
+      padding: 12px 14px;
+      color: #6d5057;
+      font-size: 13px;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .diary-entry summary span {
+      font-weight: 600;
+    }
+
+    .diary-entry summary em {
+      color: #a88a92;
+      font-style: normal;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .diary-entry pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 0;
+      padding: 0 14px 14px;
+      color: #5a4046;
+      font-family: "Noto Serif SC", Georgia, "Times New Roman", serif;
+      font-size: 12px;
+      line-height: 1.8;
+      max-height: 360px;
+      overflow: auto;
+    }
+
+    .diary-empty {
+      color: #9a7a82;
+      font-size: 12px;
+      line-height: 1.7;
+      background: rgba(255, 255, 255, 0.55);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+
+    .section-title {
+      margin-top: 22px;
+      padding-top: 18px;
+      border-top: 1px solid rgba(220, 180, 190, 0.3);
+      font-size: 12px;
+      color: #8a4a58;
+      font-weight: 600;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .hint {
+      margin-top: 8px;
+      font-size: 11px;
+      color: #9a7a82;
+      line-height: 1.6;
+    }
+
+    /* 加载动画 */
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .container {
+      animation: fadeIn 0.6s ease-out;
+    }
+
+    .status, .presets-box, .config-box {
+      animation: fadeIn 0.8s ease-out;
+    }
+
+    .restart {
+      animation: fadeIn 1s ease-out;
+    }
+  </style>
 </head>
 <body>
-<div class="container">
-  <h2>HEARTBEAT</h2>
-  <div class="subtitle">Cloud · AI Residency</div>
+  <div class="container">
+    <h2>HEARTBEAT</h2>
+    <div class="subtitle">Runtime · AI Residency</div>
 
-  <div class="status">
-    <p>Gateway <strong>云端运行中 24/7</strong></p>
-    <p>Auto Wakeup <strong>${lastWakeText}</strong></p>
-  </div>
-
-  <div class="chat-box">
-    <h3>Send Message · 给 AI 发消息</h3>
-    <div class="chat-messages" id="chatMessages">
-      <div class="chat-empty" id="chatEmpty">还没有对话，发一条消息开始吧。</div>
+    <div class="status">
+      <p>Gateway <strong>${state.gatewayStatus}</strong></p>
+      <p>Auto Wakeup <strong>${state.wakeStatus}</strong></p>
     </div>
-    <div class="chat-input-row">
-      <textarea id="chatInput" rows="2" placeholder="输入想对 AI 说的话…（Enter 发送，Shift+Enter 换行）"></textarea>
-      <button class="chat-send" onclick="sendChat()">发送</button>
+    ${state.runtimeNotice}
+
+    <div class="diary-box">
+      <h3>Wake Diary</h3>
+      ${state.diaryHtml}
     </div>
-    ${pushAvailable ? `<label class="chat-opt"><input type="checkbox" id="chatPush"> 同时推送到手机（Bark / ntfy）</label>` : ""}
-    <div class="hint">消息会带时间戳写入时间线（云端 KV），AI 会记住这次对话；回复中的 [DIARY] 会自动保存到日记。</div>
+
+    <!-- 预设方案 -->
+    <div class="presets-box">
+      <h3>预设方案</h3>
+      <div class="preset-list" id="presetList"></div>
+      <div class="add-preset">
+        <strong>保存当前配置为新预设</strong>
+        <input id="presetName" placeholder="预设名称，例如：DeepSeek / Claude">
+        <button onclick="savePreset()">保存为预设</button>
+      </div>
+    </div>
+
+    <!-- 配置表单 -->
+    <div class="config-box">
+      <form id="configForm" onsubmit="saveConfig(event)">
+        <label>API URL</label>
+        <input name="target_url" id="f_url" value="${state.currentUrl}">
+        <label>API Key</label>
+        <input name="target_key" id="f_key" placeholder="留空不修改">
+        <label>Gateway API Key</label>
+        <input name="gateway_api_key" id="f_gateway_key" placeholder="公网 /v1 鉴权 key，留空不修改">
+        <div class="hint">当前状态：${state.gatewayKeyStatus}。公开部署并开启 ALLOW_PUBLIC_API=true 时，Kelivo 的 API Key 请填写这个 Gateway API Key，不要填写上游 API Key。</div>
+        <label>Model Name</label>
+        <input name="model_name" id="f_model" value="${state.currentModel}">
+        <label>Bark Key</label>
+        <input name="bark_key" id="f_bark" placeholder="留空不修改">
+        <label>Bark Icon URL</label>
+        <input name="custom_icon" id="f_icon" value="${state.currentIcon}" placeholder="可选">
+
+        <div class="section-title">Wake Settings</div>
+        <div class="grid-2">
+          <div>
+            <label>白天多久未回复后唤醒（分钟）</label>
+            <input type="number" min="1" name="day_wake_after" id="f_day_wake_after" value="${state.wakeConfig.dayWakeAfter}">
+          </div>
+          <div>
+            <label>夜间多久未回复后唤醒（分钟）</label>
+            <input type="number" min="1" name="night_wake_after" id="f_night_wake_after" value="${state.wakeConfig.nightWakeAfter}">
+          </div>
+          <div>
+            <label>白天检查间隔（分钟）</label>
+            <input type="number" min="1" name="day_check_interval" id="f_day_check_interval" value="${state.wakeConfig.dayCheckInterval}">
+          </div>
+          <div>
+            <label>夜间检查间隔（分钟）</label>
+            <input type="number" min="1" name="night_check_interval" id="f_night_check_interval" value="${state.wakeConfig.nightCheckInterval}">
+          </div>
+          <div>
+            <label>白天开始小时</label>
+            <input type="number" min="0" max="23" name="wake_day_start_hour" id="f_wake_day_start_hour" value="${state.wakeConfig.dayStartHour}">
+          </div>
+          <div>
+            <label>白天结束小时</label>
+            <input type="number" min="1" max="24" name="wake_day_end_hour" id="f_wake_day_end_hour" value="${state.wakeConfig.dayEndHour}">
+          </div>
+        </div>
+
+        <div class="section-title">Weather</div>
+        <label>天气注入</label>
+        <select name="weather_enabled" id="f_weather_enabled">
+          <option value="false" ${state.weatherConfig.enabled === "true" ? "" : "selected"}>关闭</option>
+          <option value="true" ${state.weatherConfig.enabled === "true" ? "selected" : ""}>开启</option>
+        </select>
+        <label>位置名称</label>
+        <input name="weather_location_name" id="f_weather_location_name" value="${state.weatherConfig.locationName}" placeholder="例如：Beijing">
+        <div class="grid-2">
+          <div>
+            <label>纬度 Latitude</label>
+            <input name="weather_lat" id="f_weather_lat" value="${state.weatherConfig.lat}" placeholder="例如：39.9042">
+          </div>
+          <div>
+            <label>经度 Longitude</label>
+            <input name="weather_lon" id="f_weather_lon" value="${state.weatherConfig.lon}" placeholder="例如：116.4074">
+          </div>
+        </div>
+        <label>单位</label>
+        <select name="weather_units" id="f_weather_units">
+          <option value="metric" ${state.weatherConfig.units === "fahrenheit" ? "" : "selected"}>摄氏度 / km/h</option>
+          <option value="fahrenheit" ${state.weatherConfig.units === "fahrenheit" ? "selected" : ""}>华氏度 / mph</option>
+        </select>
+        <div class="hint">天气使用 Open-Meteo 免费接口，不需要 API Key；只有开启后才会按你填写的经纬度读取天气。</div>
+        <button type="submit" class="save">保存配置</button>
+      </form>
+    </div>
+
+    <button onclick="restartServices()" class="restart">一键重启所有服务</button>
+    <div class="note">配置保存后即时生效（云端无需重启）</div>
   </div>
 
-  <div class="diary-box">
-    <h3>Wake Diary</h3>
-    ${diaryHtml}
-  </div>
+  <script>
+    // ====== 以下脚本保持不变 ======
+    const AUTH_HEADER = ${state.authHeaderJson};
+    let presets = ${state.presetsJson};
 
-  <div class="config-box">
-    <h3>Configuration · 配置（保存后即时生效）</h3>
-    <form id="configForm" onsubmit="saveConfig(event)">
-      <label>API URL</label>
-      <input name="target_url" id="f_url" value="${escapeHtml(cfg.TARGET_API_URL)}">
-      <label>API Key</label>
-      <input name="target_key" id="f_key" placeholder="留空不修改">
-      <label>Gateway API Key</label>
-      <input name="gateway_api_key" id="f_gateway_key" placeholder="留空不修改">
-      <div class="hint">当前状态：${escapeHtml(gatewayKeyStatus)}。Worker 部署在公网，Kelivo 的 API Key 请填 Gateway API Key（不是上游 Key）。</div>
-      <label>Model Name</label>
-      <input name="model_name" id="f_model" value="${escapeHtml(cfg.MODEL_NAME)}">
-      <label>Bark Key</label>
-      <input name="bark_key" id="f_bark" placeholder="留空不修改">
-      <label>推送标题（通知栏大字，像微信的名字）</label>
-      <input name="push_title" id="f_push_title" value="${escapeHtml(cfg.PUSH_TITLE)}" placeholder="例如：DeepSeek">
-      <label>Bark Icon URL</label>
-      <input name="custom_icon" id="f_icon" value="${escapeHtml(cfg.CUSTOM_ICON_URL)}" placeholder="可选（已上传图标时留空）">
+    function escapeHtmlText(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
 
-      <div class="section-title">Wake Settings</div>
-      <div class="grid-2">
-        <div><label>白天多久未回复后唤醒（分钟）</label><input type="number" min="1" name="day_wake_after" id="f_day_wake_after" value="${escapeHtml(cfg.DAY_WAKE_AFTER_MINUTES)}"></div>
-        <div><label>夜间多久未回复后唤醒（分钟）</label><input type="number" min="1" name="night_wake_after" id="f_night_wake_after" value="${escapeHtml(cfg.NIGHT_WAKE_AFTER_MINUTES)}"></div>
-        <div><label>白天检查间隔（分钟）</label><input type="number" min="1" name="day_check_interval" id="f_day_check_interval" value="${escapeHtml(cfg.DAY_CHECK_INTERVAL_MINUTES)}"></div>
-        <div><label>夜间检查间隔（分钟）</label><input type="number" min="1" name="night_check_interval" id="f_night_check_interval" value="${escapeHtml(cfg.NIGHT_CHECK_INTERVAL_MINUTES)}"></div>
-        <div><label>白天开始小时</label><input type="number" min="0" max="23" name="wake_day_start_hour" id="f_wake_day_start_hour" value="${escapeHtml(cfg.WAKE_DAY_START_HOUR)}"></div>
-        <div><label>白天结束小时</label><input type="number" min="1" max="24" name="wake_day_end_hour" id="f_wake_day_end_hour" value="${escapeHtml(cfg.WAKE_DAY_END_HOUR)}"></div>
-        <div><label>推送冷却（分钟，0=可连着发）</label><input type="number" min="0" max="1440" name="push_cooldown" id="f_push_cooldown" value="${escapeHtml(cfg.PUSH_COOLDOWN_MINUTES)}"></div>
-      </div>
-      <div class="hint">白天/夜间使用不同阈值；超过阈值后还会随机等待（阈值 × 1.0~2.5 倍），节奏不规律。</div>
+    function renderPresets() {
+      const list = document.getElementById("presetList");
+      if (!presets.length) {
+        list.innerHTML = '<div style="color:#aaa;font-size:12px;font-style:italic;">还没有预设，保存当前配置即可创建。</div>';
+        return;
+      }
+      list.innerHTML = presets.map((p, idx) => {
+        return '<div class="preset-item">' +
+          '<button class="preset-btn" onclick="applyPreset(' + idx + ')">' + escapeHtmlText(p.name) + '<span>' + escapeHtmlText(p.model_name) + '</span></button>' +
+          '<button class="preset-del" onclick="deletePreset(' + idx + ')">删除</button>' +
+        '</div>';
+      }).join("");
+    }
 
-      <div class="section-title">例假周期（可选）</div>
-      <label>上次例假开始日期</label>
-      <input name="period_start_date" id="f_period_start_date" value="${escapeHtml(cfg.PERIOD_START_DATE)}" placeholder="例如：2026-08-01（留空则关闭）">
-      <div class="grid-2">
-        <div><label>周期天数</label><input type="number" min="15" max="60" name="period_cycle_days" id="f_period_cycle_days" value="${escapeHtml(cfg.PERIOD_CYCLE_DAYS)}"></div>
-        <div><label>经期持续天数</label><input type="number" min="1" max="14" name="period_duration_days" id="f_period_duration_days" value="${escapeHtml(cfg.PERIOD_DURATION_DAYS)}"></div>
-      </div>
-      <div class="hint">填写后 AI 会知道自己处于哪个阶段（经期/排卵期等），唤醒时会自然地关心或提醒，作为聊天素材。</div>
+    function applyPreset(idx) {
+      const p = presets[idx];
+      document.getElementById("f_url").value = p.target_url || "";
+      document.getElementById("f_model").value = p.model_name || "";
+      if (p.target_key) document.getElementById("f_key").value = p.target_key;
+      document.querySelector(".config-box").scrollIntoView({ behavior: "smooth" });
+    }
 
-      <div class="section-title">Weather</div>
-      <label>天气注入</label>
-      <select name="weather_enabled" id="f_weather_enabled">
-        <option value="false" ${cfg.WEATHER_ENABLED === "true" ? "" : "selected"}>关闭</option>
-        <option value="true" ${cfg.WEATHER_ENABLED === "true" ? "selected" : ""}>开启</option>
-      </select>
-      <label>位置名称</label>
-      <input name="weather_location_name" id="f_weather_location_name" value="${escapeHtml(cfg.WEATHER_LOCATION_NAME)}" placeholder="例如：London">
-      <div class="grid-2">
-        <div><label>纬度</label><input name="weather_lat" id="f_weather_lat" value="${escapeHtml(cfg.WEATHER_LAT)}" placeholder="例如：51.5072"></div>
-        <div><label>经度</label><input name="weather_lon" id="f_weather_lon" value="${escapeHtml(cfg.WEATHER_LON)}" placeholder="例如：-0.1276"></div>
-      </div>
-      <label>单位</label>
-      <select name="weather_units" id="f_weather_units">
-        <option value="metric" ${cfg.WEATHER_UNITS === "fahrenheit" ? "" : "selected"}>摄氏度 / km/h</option>
-        <option value="fahrenheit" ${cfg.WEATHER_UNITS === "fahrenheit" ? "selected" : ""}>华氏度 / mph</option>
-      </select>
-      <button type="submit" class="save">保存配置</button>
-    </form>
-  </div>
-  <div class="note">配置保存在云端 KV，保存即生效，无需重启</div>
-</div>
+    async function saveConfig(event) {
+      event.preventDefault();
+      const payload = {
+        target_url: document.getElementById("f_url").value.trim(),
+        target_key: document.getElementById("f_key").value.trim(),
+        gateway_api_key: document.getElementById("f_gateway_key").value.trim(),
+        model_name: document.getElementById("f_model").value.trim(),
+        bark_key: document.getElementById("f_bark").value.trim(),
+        custom_icon: document.getElementById("f_icon").value.trim(),
+        day_wake_after: document.getElementById("f_day_wake_after").value.trim(),
+        night_wake_after: document.getElementById("f_night_wake_after").value.trim(),
+        day_check_interval: document.getElementById("f_day_check_interval").value.trim(),
+        night_check_interval: document.getElementById("f_night_check_interval").value.trim(),
+        wake_day_start_hour: document.getElementById("f_wake_day_start_hour").value.trim(),
+        wake_day_end_hour: document.getElementById("f_wake_day_end_hour").value.trim(),
+        weather_enabled: document.getElementById("f_weather_enabled").value,
+        weather_location_name: document.getElementById("f_weather_location_name").value.trim(),
+        weather_lat: document.getElementById("f_weather_lat").value.trim(),
+        weather_lon: document.getElementById("f_weather_lon").value.trim(),
+        weather_units: document.getElementById("f_weather_units").value
+      };
 
-<script>
-  const AUTH_HEADER = ${authHeaderJson};
-  function esc(v){ return String(v||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;"); }
-  function fmt(iso){ if(!iso) return ""; try{ return new Date(iso).toLocaleString("zh-CN",{hour12:false}); }catch(e){ return ""; } }
-  function bubble(role, content, ts, proactive){
-    const empty = document.getElementById("chatEmpty"); if(empty) empty.remove();
-    const box = document.getElementById("chatMessages");
-    const d = document.createElement("div"); d.className = "chat-bubble " + role + (proactive ? " proactive" : "");
-    const tag = proactive ? '<span class="chat-tag">主动</span>' : "";
-    d.innerHTML = tag + esc(content) + (ts ? '<span class="chat-time">' + esc(fmt(ts)) + "</span>" : "");
-    box.appendChild(d); box.scrollTop = box.scrollHeight;
-  }
-  async function loadHistory(){
-    try {
-      const r = await fetch("/admin/chat/history", { headers: { "Authorization": AUTH_HEADER } });
-      const data = await r.json();
-      for (const m of (data.messages||[])) bubble(m.role === "user" ? "user" : "ai", m.content, m.ts, m.proactive);
-    } catch(e){}
-  }
-  async function sendChat(){
-    const input = document.getElementById("chatInput");
-    const text = input.value.trim(); if(!text) return;
-    const btn = document.querySelector(".chat-send"); btn.disabled = true;
-    bubble("user", text); input.value = "";
-    const typing = document.createElement("div"); typing.className = "chat-typing"; typing.textContent = "AI 正在思考…";
-    document.getElementById("chatMessages").appendChild(typing);
-    const pushEl = document.getElementById("chatPush");
-    try {
-      const r = await fetch("/admin/chat/send", {
+      if (!payload.target_url || !payload.model_name) {
+        alert("请填写 API 地址和模型名称");
+        return;
+      }
+
+      try {
+        const resp = await fetch("/admin/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": AUTH_HEADER },
+          body: JSON.stringify(payload)
+        });
+        const result = await resp.json();
+        if (result.success) {
+          document.getElementById("f_key").value = "";
+          document.getElementById("f_gateway_key").value = "";
+          document.getElementById("f_bark").value = "";
+          alert("配置已保存并即时生效。");
+        } else {
+          alert("保存失败：" + (result.error || "未知错误"));
+        }
+      } catch (e) {
+        alert("请求失败：" + e.message);
+      }
+    }
+
+    async function savePreset() {
+      const name = document.getElementById("presetName").value.trim();
+      const target_url = document.getElementById("f_url").value.trim();
+      const target_key = document.getElementById("f_key").value.trim();
+      const model_name = document.getElementById("f_model").value.trim();
+      if (!name) { alert("请填写预设名称"); return; }
+      if (!target_url || !model_name) { alert("请先填写 API 地址和模型名称"); return; }
+
+      const resp = await fetch("/admin/presets/save", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": AUTH_HEADER },
-        body: JSON.stringify({ message: text, push_to_phone: !!(pushEl && pushEl.checked) })
+        body: JSON.stringify({ name, target_url, target_key, model_name })
       });
-      const data = await r.json(); typing.remove();
-      if (data.success) {
-        bubble("ai", data.reply, new Date().toISOString());
-        if (data.push && data.push.ok) bubble("ai", "📳 已推送到手机（" + data.push.providerLabel + "）", null);
-        else if (data.push && !data.push.ok) bubble("ai", "⚠ 推送失败：" + data.push.reason, null);
-      } else bubble("ai", "⚠ " + (data.error || "发送失败"), null);
-    } catch(e){ typing.remove(); bubble("ai", "⚠ 请求失败：" + e.message, null); }
-    finally { btn.disabled = false; input.focus(); }
-  }
-  async function saveConfig(event){
-    event.preventDefault();
-    const p = (id) => document.getElementById(id).value.trim();
-    const payload = {
-      target_url: p("f_url"), target_key: p("f_key"), gateway_api_key: p("f_gateway_key"),
-      model_name: p("f_model"), bark_key: p("f_bark"), custom_icon: p("f_icon"), push_title: p("f_push_title"),
-      day_wake_after: p("f_day_wake_after"), night_wake_after: p("f_night_wake_after"),
-      day_check_interval: p("f_day_check_interval"), night_check_interval: p("f_night_check_interval"),
-      wake_day_start_hour: p("f_wake_day_start_hour"), wake_day_end_hour: p("f_wake_day_end_hour"),
-      push_cooldown: p("f_push_cooldown"),
-      period_start_date: p("f_period_start_date"), period_cycle_days: p("f_period_cycle_days"), period_duration_days: p("f_period_duration_days"),
-      weather_enabled: document.getElementById("f_weather_enabled").value,
-      weather_location_name: p("f_weather_location_name"),
-      weather_lat: p("f_weather_lat"), weather_lon: p("f_weather_lon"),
-      weather_units: document.getElementById("f_weather_units").value
-    };
-    if (!payload.target_url || !payload.model_name) { alert("请填写 API 地址和模型名称"); return; }
-    try {
-      const r = await fetch("/admin/save", {
+      const r = await resp.json();
+      if (r.success) {
+        const existing = presets.findIndex(p => p.name === name);
+        const entry = { name, target_url, target_key, model_name };
+        if (existing >= 0) presets[existing] = entry;
+        else presets.push(entry);
+        renderPresets();
+        document.getElementById("presetName").value = "";
+        alert("预设已保存：" + name);
+      } else {
+        alert("保存失败：" + (r.error || "未知错误"));
+      }
+    }
+
+    async function deletePreset(idx) {
+      const p = presets[idx];
+      if (!confirm("删除预设「" + p.name + "」？")) return;
+      await fetch("/admin/presets/delete", {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": AUTH_HEADER },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({ name: p.name })
       });
-      const data = await r.json();
-      if (data.success) {
-        document.getElementById("f_key").value = "";
-        document.getElementById("f_gateway_key").value = "";
-        document.getElementById("f_bark").value = "";
-        alert("配置已保存并即时生效 ✅");
-      } else alert("保存失败：" + (data.error || "未知错误"));
-    } catch(e){ alert("请求失败：" + e.message); }
-  }
-  document.getElementById("chatInput").addEventListener("keydown", function(e){
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); }
-  });
-  loadHistory();
-</script>
+      presets.splice(idx, 1);
+      renderPresets();
+    }
+
+    async function restartServices() {
+      if (!confirm("云端配置已即时生效，无需重启。刷新页面查看最新状态？")) return;
+      try {
+        const resp = await fetch("/admin/restart", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": AUTH_HEADER },
+          body: "{}"
+        });
+        const result = await resp.json();
+        if (result.success) {
+          alert("重启成功！页面稍后自动刷新。");
+          setTimeout(() => location.reload(), 3000);
+        } else {
+          alert("重启失败：" + (result.error || "未知错误"));
+        }
+      } catch (e) {
+        alert("请求失败：" + e.message);
+      }
+    }
+
+    renderPresets();
+  </script>
 </body>
 </html>`;
 }
@@ -1422,9 +1891,9 @@ async function handleRequest(request, env) {
 
   // ---------- /admin 管理页 ----------
   if (path === "/admin" && request.method === "GET") {
-    const lastWake = await env.CONFIG.get("lastWakeCheck");
-    const lastWakeText = lastWake
-      ? `在线（最近唤醒: ${new Date(lastWake).toLocaleString("zh-CN")}）`
+    const lastWakeSent = await env.CONFIG.get("lastWakeSent");
+    const wakeStatus = lastWakeSent
+      ? `在线（上次推送: ${formatLocalTimestamp(cfg, new Date(lastWakeSent))}）`
       : "等待首次唤醒";
     const diaryEntries = await readDiaryEntries(env, 20);
     const diaryHtml = diaryEntries.length
@@ -1434,99 +1903,40 @@ async function handleRequest(request, env) {
           <pre>${escapeHtml(entry.content)}</pre>
         </details>
       `).join("")
-      : `<div class="diary-empty">还没有日记。AI 在唤醒回复里输出 [DIARY]...[/DIARY] 后会保存到这里。</div>`;
+      : `<div class="diary-empty">还没有日记。模型在 wake-up 回复里输出 [DIARY]...[/DIARY] 后会保存到这里。</div>`;
+    const presets = await loadPresets(env);
     // 批注：用 UTF-8 编码后再 base64，与 checkBasicAuth 的 TextDecoder(UTF-8) 对齐，
     // 修复非 ASCII（中文/emoji）管理员密码在管理页内请求时鉴权失败的问题。
     const authToken = btoa(String.fromCharCode(...new TextEncoder().encode(`${cfg.ADMIN_USER}:${cfg.ADMIN_PASSWORD}`)));
-    const authHeaderJson = JSON.stringify(`Basic ${authToken}`).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
-    const html = adminPageHtml({ cfg, lastWakeText, diaryHtml, authHeaderJson });
+    const state = {
+      gatewayStatus: "运行中（Cloudflare 边缘）",
+      wakeStatus,
+      runtimeNotice: "",
+      diaryHtml,
+      currentUrl: escapeHtml(cfg.TARGET_API_URL),
+      currentModel: escapeHtml(cfg.MODEL_NAME),
+      currentIcon: escapeHtml(cfg.CUSTOM_ICON_URL),
+      gatewayKeyStatus: escapeHtml(cfg.GATEWAY_API_KEY ? "已配置" : "未配置"),
+      wakeConfig: {
+        dayWakeAfter: escapeHtml(cfg.DAY_WAKE_AFTER_MINUTES),
+        nightWakeAfter: escapeHtml(cfg.NIGHT_WAKE_AFTER_MINUTES),
+        dayCheckInterval: escapeHtml(cfg.DAY_CHECK_INTERVAL_MINUTES),
+        nightCheckInterval: escapeHtml(cfg.NIGHT_CHECK_INTERVAL_MINUTES),
+        dayStartHour: escapeHtml(cfg.WAKE_DAY_START_HOUR),
+        dayEndHour: escapeHtml(cfg.WAKE_DAY_END_HOUR)
+      },
+      weatherConfig: {
+        enabled: cfg.WEATHER_ENABLED,
+        locationName: escapeHtml(cfg.WEATHER_LOCATION_NAME),
+        lat: escapeHtml(cfg.WEATHER_LAT),
+        lon: escapeHtml(cfg.WEATHER_LON),
+        units: cfg.WEATHER_UNITS
+      },
+      authHeaderJson: JSON.stringify(`Basic ${authToken}`).replace(/</g, "\\u003c").replace(/>/g, "\\u003e"),
+      presetsJson: JSON.stringify(presets).replace(/</g, "\\u003c").replace(/>/g, "\\u003e")
+    };
+    const html = adminPageHtml(state);
     return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8" } });
-  }
-
-  // ---------- /admin/chat/history ----------
-  if (path === "/admin/chat/history" && request.method === "GET") {
-    const timeline = await loadTimeline(env);
-    const tsDB = await loadTimestampDB(env);
-    const messages = [];
-    for (const m of timeline) {
-      const parsed = extractTimestampWithMemory(m, tsDB);
-      const ts = parsed ? parsed.toISOString() : null;
-      if (m.role === "user") {
-        messages.push({ role: "user", content: stripLeadingTimestamp(normalizeContentToText(m.content)), ts });
-      } else if (m.role === "assistant") {
-        const proactive = extractProactivePushContent(m);
-        if (proactive) {
-          // AI 主动发的推送，作为对话消息显示（标记 proactive）
-          messages.push({ role: "assistant", content: proactive, ts, proactive: true });
-        } else if (!isSpecialEvent(m)) {
-          messages.push({ role: "assistant", content: stripLeadingTimestamp(normalizeContentToText(m.content)), ts });
-        }
-      }
-    }
-    return json({ messages: messages.slice(-60) });
-  }
-
-  // ---------- /admin/chat/send ----------
-  if (path === "/admin/chat/send" && request.method === "POST") {
-    let body;
-    try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
-    const text = String(body?.message || "").trim();
-    if (!text) return json({ error: "message 不能为空" }, 400);
-    if (text.length > 4000) return json({ error: "消息过长（最多 4000 字符）" }, 400);
-    if (!cfg.TARGET_API_URL || !cfg.TARGET_API_KEY || !cfg.MODEL_NAME) {
-      return json({ error: "TARGET_API_URL / TARGET_API_KEY / MODEL_NAME 未配置" }, 500);
-    }
-
-    const userTs = formatLocalTimestamp(cfg);
-    const userMsg = { role: "user", content: `（${userTs}）${text}` };
-    const llmMessages = [...await buildChatContextMessages(env), userMsg];
-
-    // 用户发消息后无需重置唤醒计时：唤醒检查会从时间线解析"最后说话时间"（与原版一致）
-
-    // 注入个人上下文（时间/天气/例假）+ 推送指令
-    const personalCtx = await buildPersonalContext(env, cfg);
-    const response = await fetch(cfg.TARGET_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.TARGET_API_KEY}` },
-      body: JSON.stringify({
-        model: cfg.MODEL_NAME, messages: injectContext(llmMessages, personalCtx + CHAT_STYLE_INSTRUCTION + PUSH_INSTRUCTION), temperature: 0.8, top_p: 0.95, stream: false
-      })
-    });
-    const responseText = await response.text();
-    let data = null;
-    try { data = JSON.parse(responseText); } catch {}
-    if (!response.ok) {
-      return json({ error: `上游模型请求失败（HTTP ${response.status}）：${responseText.slice(0, 300)}` }, 502);
-    }
-    const rawReply = normalizeContentToText(data?.choices?.[0]?.message?.content).trim();
-    if (!rawReply) return json({ error: "模型返回了空回复" }, 502);
-
-    // 解析 [PUSH] 标记（对话里要求发推送时）
-    const pushExtract = extractPushFromReply(rawReply);
-    let pushResult = null;
-    if (pushExtract.push) {
-      pushResult = await sendPushNotification(env, cfg, {
-        title: (cfg.PUSH_TITLE || "来自 AI").slice(0, 20),
-        body: pushExtract.push.body.slice(0, 20)
-      });
-    }
-
-    const diaryResult = extractDiaryFromResponse(pushExtract.remaining);
-    const diarySaved = await appendDiaryEntry(env, cfg, diaryResult.diaryContent);
-    const assistantMsg = { role: "assistant", content: `（${formatLocalTimestamp(cfg)}）${diaryResult.remainingText}` };
-
-    const merged = [...await loadTimeline(env), userMsg, assistantMsg];
-    await saveTimeline(env, buildTimeline(merged, await loadTimeline(env), await loadTimestampDB(env)));
-    await rememberTimestampsForMessages(env, [userMsg, assistantMsg]);
-
-    // 管理页勾选"推送到手机"时，把 AI 回复也推到手机
-    if (body?.push_to_phone && !pushResult) {
-      const lines = diaryResult.remainingText.split("\n").map(l => l.trim()).filter(Boolean);
-      const bodyText = lines.join(" ");
-      pushResult = await sendPushNotification(env, cfg, { title: (cfg.PUSH_TITLE || "来自 AI").slice(0, 20), body: bodyText.slice(0, 20) });
-    }
-
-    return json({ success: true, reply: diaryResult.remainingText, diarySaved, push: pushResult, userTs });
   }
 
   // ---------- /admin/save ----------
@@ -1539,12 +1949,10 @@ async function handleRequest(request, env) {
     const updates = {};
     const map = {
       target_url: "TARGET_API_URL", target_key: "TARGET_API_KEY", gateway_api_key: "GATEWAY_API_KEY",
-      model_name: "MODEL_NAME", bark_key: "BARK_KEY", custom_icon: "CUSTOM_ICON_URL", push_title: "PUSH_TITLE",
+      model_name: "MODEL_NAME", bark_key: "BARK_KEY", custom_icon: "CUSTOM_ICON_URL",
       day_wake_after: "DAY_WAKE_AFTER_MINUTES", night_wake_after: "NIGHT_WAKE_AFTER_MINUTES",
       day_check_interval: "DAY_CHECK_INTERVAL_MINUTES", night_check_interval: "NIGHT_CHECK_INTERVAL_MINUTES",
       wake_day_start_hour: "WAKE_DAY_START_HOUR", wake_day_end_hour: "WAKE_DAY_END_HOUR",
-      push_cooldown: "PUSH_COOLDOWN_MINUTES",
-      period_start_date: "PERIOD_START_DATE", period_cycle_days: "PERIOD_CYCLE_DAYS", period_duration_days: "PERIOD_DURATION_DAYS",
       weather_enabled: "WEATHER_ENABLED", weather_location_name: "WEATHER_LOCATION_NAME",
       weather_lat: "WEATHER_LAT", weather_lon: "WEATHER_LON", weather_units: "WEATHER_UNITS"
     };
@@ -1554,6 +1962,34 @@ async function handleRequest(request, env) {
     }
     await saveConfig(env, updates);
     return json({ success: true });
+  }
+
+  // ---------- /admin/presets/save ----------
+  if (path === "/admin/presets/save" && request.method === "POST") {
+    let body;
+    try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
+    const { name, target_url, target_key, model_name } = body || {};
+    if (!name || !target_url || !model_name) return json({ error: "name / target_url / model_name 必填" }, 400);
+    const presets = await loadPresets(env);
+    const existing = presets.findIndex(p => p.name === name);
+    const entry = { name, target_url, target_key: target_key || "", model_name };
+    if (existing >= 0) presets[existing] = entry; else presets.push(entry);
+    await savePresets(env, presets);
+    return json({ success: true });
+  }
+
+  // ---------- /admin/presets/delete ----------
+  if (path === "/admin/presets/delete" && request.method === "POST") {
+    let body;
+    try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
+    const presets = (await loadPresets(env)).filter(p => p.name !== body?.name);
+    await savePresets(env, presets);
+    return json({ success: true });
+  }
+
+  // ---------- /admin/restart ----------
+  if (path === "/admin/restart" && request.method === "POST") {
+    return json({ success: true, note: "云端无需重启，配置已即时生效" });
   }
 
   // ---------- /icon 图标托管（Bark 推送 icon 用） ----------
