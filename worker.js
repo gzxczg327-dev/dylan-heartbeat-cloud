@@ -648,10 +648,18 @@ function checkBasicAuth(request, cfg) {
 }
 
 function checkGatewayKey(request, cfg) {
-  const auth = request.headers.get("Authorization") || "";
+  const key = String(cfg.GATEWAY_API_KEY || "");
+  if (!key) return false;
+  // Authorization: Bearer <key> 或 Authorization: <key>
+  const auth = String(request.headers.get("Authorization") || "").trim();
   const bearer = auth.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || "";
-  const headerKey = String(request.headers.get("x-gateway-api-key") || request.headers.get("x-api-key") || "").trim();
-  return bearer === cfg.GATEWAY_API_KEY || headerKey === cfg.GATEWAY_API_KEY;
+  if (bearer === key) return true;
+  if (auth === key || auth === `Bearer ${key}`) return true;
+  // 常见 API Key 请求头（Kelivo 的 MCP 自定义请求头可能用这些名字）
+  for (const name of ["x-gateway-api-key", "x-api-key", "api-key", "apikey", "x-key", "x-token", "token"]) {
+    if (String(request.headers.get(name) || "").trim() === key) return true;
+  }
+  return false;
 }
 
 // ---------- 摘要日志 ----------
