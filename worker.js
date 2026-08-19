@@ -982,9 +982,8 @@ async function buildChatContextMessages(env) {
 }
 
 // ---------- 工具执行（供 /mcp 的 tools/call 调用） ----------
-// 这里只负责「查数据」，由 /mcp 端点暴露成 MCP 工具；
-// 聊天网关不再注入 tools，避免和 Kelivo 自己的 MCP 工具冲突。
-async function executeChatTool(name, args, env) {
+// 由 /mcp 端点暴露成 MCP 工具；聊天网关不再注入 tools，避免和 Kelivo 自己的 MCP 工具冲突。
+async function executeChatTool(name, args, env, cfg) {
   const limit = Math.max(1, Math.min(50, Number(args?.limit) || 10));
   if (name === "read_push_records") {
     const timeline = await loadTimeline(env);
@@ -1007,6 +1006,16 @@ async function executeChatTool(name, args, env) {
         return `[${m.role === "user" ? "用户" : "AI"}]${time ? ` ${time}` : ""} ${body}`;
       });
     return history.length ? history.join("\n") : "（暂无聊天记录）";
+  }
+  if (name === "send_push") {
+    const body = String(args?.body || "").trim().slice(0, 20);
+    if (!body) return "（未发送：正文为空）";
+    const title = (String(args?.title || "").trim() || (cfg?.PUSH_TITLE || "来自 AI")).slice(0, 20);
+    const pr = await sendPushNotification(env, cfg, { title, body });
+    if (!pr.ok) return `（发送失败：${pr.providerLabel} ${pr.reason || ""}）`;
+    await env.CONFIG.put("lastWakeSent", new Date().toISOString());
+    await appendSpecialEvent(env, `（${formatLocalTimestamp(cfg)} 刚刚给用户发了${pr.providerLabel}推送：${title}｜${body}）`);
+    return `（已发送 ${pr.providerLabel} 推送：${title}｜${body}）`;
   }
   return "（未知工具）";
 }
@@ -1032,6 +1041,18 @@ function mcpToolList() {
         type: "object",
         properties: { limit: { type: "integer", description: "最多返回条数，默认 20" } },
         required: []
+      }
+    },
+    {
+      name: "send_push",
+      description: "给用户的手机发一条 Bark 推送（像微信消息一样主动联系她）。当用户明确要求你「给我发消息 / 推给我 / 发个推送 / 发我手机上」时调用。发送后这条会被记录进时间线，你以后用 read_push_records 能查到。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "推送标题（≤20 字），可留空用系统默认标题" },
+          body: { type: "string", description: "推送正文（≤20 字），符合人设、口语化" }
+        },
+        required: ["body"]
       }
     }
   ];
@@ -1091,7 +1112,7 @@ async function handleMcp(request, env, cfg) {
   if (method === "tools/call") {
     const name = String(body?.params?.name || "");
     const args = body?.params?.arguments || {};
-    const text = await executeChatTool(name, args, env);
+    const text = await executeChatTool(name, args, env, cfg);
     return ok(mcpTextResult(text));
   }
   return fail(-32601, `Method not found: ${method}`);
