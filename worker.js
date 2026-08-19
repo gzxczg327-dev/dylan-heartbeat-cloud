@@ -13,10 +13,10 @@
 
 // ---------- 默认配置（对应 .env.example） ----------
 const DEFAULTS = {
-  TARGET_API_URL: "",
+  TARGET_API_URL: "https://api.deepseek.com/v1/chat/completions",
   TARGET_API_KEY: "",
   GATEWAY_API_KEY: "",
-  MODEL_NAME: "gateway-model",
+  MODEL_NAME: "deepseek-v4-flash",
   BARK_KEY: "",
   CUSTOM_ICON_URL: "",
   PUSH_TITLE: "DeepSeek",
@@ -182,6 +182,20 @@ function extractProactivePushContent(msg) {
   if (!m) return null;
   const body = m[1].trim().replace(/[）)]\s*$/, "").trim();
   return body || null;
+}
+
+// 从特殊事件里取原始本地时间字符串（如 "2026-08-18 14:30"），避免跨时区重解析出错
+function extractTimestampString(content) {
+  const match = String(content || "").match(/（?\s*(\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:[ T]?)\d{1,2}[:：]\d{2})/);
+  return match ? match[1] : "";
+}
+
+// 从特殊事件里取「时间 + 推送正文」，供聊天/唤醒注入，让 AI 知道自己什么时候发过什么
+function extractProactivePushRecord(msg) {
+  if (!isSpecialEvent(msg)) return null;
+  const body = extractProactivePushContent(msg);
+  if (!body) return null;
+  return { time: extractTimestampString(normalizeContentToText(msg.content)), body };
 }
 
 function parseTimestampLabel(value) {
@@ -455,33 +469,8 @@ function randomWakeDelayMinutes(cfg, date = new Date()) {
   return Math.floor(getWakeAfterMinutes(cfg, date) * factor);
 }
 
-// 推送指令：注入到发给 LLM 的 messages 里，让 AI 知道"用户要求发推送时输出 [PUSH]"
-const PUSH_INSTRUCTION = `\n\n【手机推送指令】当用户明确要求你发手机推送（例如"给我发消息"、"推给我"、"发个推送"、"发我手机上"）时，在回复末尾附加 [PUSH]标题|正文[/PUSH]：标题≤10字，正文≤20字，内容符合你的人设并延续当前上下文。系统会把 [PUSH]...[/PUSH] 转成手机推送并从你的回复里移除，用户看不到标记本身。不要主动加这个标记，只在用户要求时才加。`;
-
-// 对话风格指令：人设优先 + 自然 + 结合上下文 + 可开新话题
-const CHAT_STYLE_INSTRUCTION = `\n\n【对话风格】以你的人设和性格为最高准则，像真人聊天。不要机械的一问一答，也不要生硬地切碎句子。想多说几句就自然多说（换行分隔），想回一句就一句。顺着你们最近聊的内容往下接，也可以自然带出新的想法、分享或提问。用词、语气、句子长短都严格符合你的角色设定。`;
-
-function injectContext(messages, context) {
-  const list = messages.map(m => ({ ...m }));
-  const sys = list.find(m => m.role === "system");
-  if (sys) {
-    // 人设优先：把风格/上下文指令放在 system 末尾作为补充，不压过人设
-    sys.content = normalizeContentToText(sys.content) + "\n\n" + context;
-  } else {
-    list.unshift({ role: "system", content: context });
-  }
-  return list;
-}
-
-// 个人上下文：时间 + 天气 + 例假，注入到对话里让 AI 始终知道
-async function buildPersonalContext(env, cfg) {
-  const parts = [`当前时间：${formatLocalTimestamp(cfg)}`];
-  const weather = await fetchWeatherContext(cfg);
-  if (weather) parts.push(weather);
-  const period = getPeriodContext(cfg);
-  if (period) parts.push(period);
-  return parts.join("\n");
-}
+// 人设与记忆由 Kelivo 端维护，Worker 不再注入风格/推送指令，避免干扰人设；
+// Worker 只负责：转发聊天、维护时间线、记录「发了什么/何时发」、定时主动唤醒。
 
 // 从上游响应文本提取 AI 文本内容（兼容 JSON 与 SSE 两种格式）
 function extractContentFromUpstream(text, contentType) {
@@ -832,7 +821,11 @@ async function runWakeUp(env, cfg) {
   const recentPushes = cleanMessages
     .filter(isSpecialEvent)
     .slice(-4)
-    .map(m => `- ${stripLeadingTimestamp(normalizeContentToText(m.content)).trim()}`)
+    .map(m => {
+      const rec = extractProactivePushRecord(m);
+      if (rec) return `- ${rec.time ? `${rec.time} ｜ ` : ""}${rec.body}`;
+      return `- ${stripLeadingTimestamp(normalizeContentToText(m.content)).trim()}`;
+    })
     .join("\n");
   const wakePrompt = buildWakePrompt(cfg, formatLocalTimestamp(cfg), diffMinutes, topicContext, recentPushes);
   const historyText = cleanMessages
@@ -986,6 +979,149 @@ async function buildChatContextMessages(env) {
   }
   result.push(...history);
   return result;
+}
+
+// ---------- 工具调用（MCP 的 OpenAI 兼容等价物） ----------
+// 让 AI 在需要时主动调用这些函数去查 Worker 里记的推送/聊天记录，
+// 而不是只靠被动注入。deepseek-v4 系列原生支持 tool calls。
+const CHAT_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "read_push_records",
+      description: "查询你（AI）之前主动发给用户的手机推送记录，含发送时间和正文。当你需要回忆自己发过什么、避免重复，或用户问起「你之前发了什么」时调用。",
+      parameters: {
+        type: "object",
+        properties: { limit: { type: "integer", description: "最多返回条数，默认 10" } },
+        required: []
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_chat_timeline",
+      description: "查询最近的聊天时间线（用户和 AI 的对话，含时间）。当你需要回忆更早的上下文时调用。",
+      parameters: {
+        type: "object",
+        properties: { limit: { type: "integer", description: "最多返回条数，默认 20" } },
+        required: []
+      }
+    }
+  }
+];
+
+async function executeChatTool(name, args, env) {
+  const limit = Math.max(1, Math.min(50, Number(args?.limit) || 10));
+  if (name === "read_push_records") {
+    const timeline = await loadTimeline(env);
+    const records = timeline
+      .filter(isSpecialEvent)
+      .map(extractProactivePushRecord)
+      .filter(Boolean)
+      .slice(-limit);
+    if (!records.length) return "（暂无主动推送记录）";
+    return records.map((r, i) => `${i + 1}. ${r.time ? `${r.time} ｜ ` : ""}${r.body}`).join("\n");
+  }
+  if (name === "read_chat_timeline") {
+    const timeline = await loadTimeline(env);
+    const history = timeline
+      .filter(m => (m.role === "user" || m.role === "assistant") && !isSpecialEvent(m))
+      .slice(-limit)
+      .map(m => {
+        const time = extractTimestampString(normalizeContentToText(m.content));
+        const body = stripLeadingTimestamp(normalizeContentToText(m.content));
+        return `[${m.role === "user" ? "用户" : "AI"}]${time ? ` ${time}` : ""} ${body}`;
+      });
+    return history.length ? history.join("\n") : "（暂无聊天记录）";
+  }
+  return "（未知工具）";
+}
+
+// ---------- MCP 服务（Streamable HTTP，供 Kelivo 的 MCP 功能连接） ----------
+const MCP_SERVER_INFO = { name: "dylan-heartbeat", title: "Dylan Heartbeat", version: "1.0.0" };
+
+function mcpToolList() {
+  return [
+    {
+      name: "read_push_records",
+      description: "查询 AI 之前主动发给用户的手机推送记录（含发送时间和正文）。当你需要回忆自己发过什么、或用户问起「你之前发了什么」时调用。",
+      inputSchema: {
+        type: "object",
+        properties: { limit: { type: "integer", description: "最多返回条数，默认 10" } },
+        required: []
+      }
+    },
+    {
+      name: "read_chat_timeline",
+      description: "查询最近的聊天时间线（用户和 AI 的对话，含时间）。需要回忆更早上下文时调用。",
+      inputSchema: {
+        type: "object",
+        properties: { limit: { type: "integer", description: "最多返回条数，默认 20" } },
+        required: []
+      }
+    }
+  ];
+}
+
+function mcpTextResult(text) {
+  return { content: [{ type: "text", text: text || "（空）" }], isError: false };
+}
+
+async function handleMcp(request, env, cfg) {
+  // GET：返回服务信息，方便 Kelivo 里做连通性测试
+  if (request.method !== "POST") {
+    return new Response(JSON.stringify({ name: MCP_SERVER_INFO.name, version: MCP_SERVER_INFO.version, endpoint: "/mcp", protocol: "mcp" }), {
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
+  // 鉴权：Bearer / x-api-key / ?key= 三种都认，key 填 GATEWAY_API_KEY
+  const urlKey = new URL(request.url).searchParams.get("key") || "";
+  const authorized = checkGatewayKey(request, cfg) || (!!cfg.GATEWAY_API_KEY && urlKey === cfg.GATEWAY_API_KEY);
+  if (!authorized) {
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Unauthorized" } }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
+  let body;
+  try { body = await request.json(); } catch {
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+
+  const id = body?.id ?? null;
+  const method = String(body?.method || "");
+  const ok = (result) => new Response(JSON.stringify({ jsonrpc: "2.0", id, result }), {
+    headers: { "Content-Type": "application/json" }
+  });
+  const fail = (code, message) => new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }), {
+    headers: { "Content-Type": "application/json" }
+  });
+
+  if (method === "initialize") {
+    return ok({ protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: MCP_SERVER_INFO });
+  }
+  if (method === "notifications/initialized") {
+    return new Response(null, { status: 202 });
+  }
+  if (method === "ping") {
+    return ok({});
+  }
+  if (method === "tools/list") {
+    return ok({ tools: mcpToolList() });
+  }
+  if (method === "tools/call") {
+    const name = String(body?.params?.name || "");
+    const args = body?.params?.arguments || {};
+    const text = await executeChatTool(name, args, env);
+    return ok(mcpTextResult(text));
+  }
+  return fail(-32601, `Method not found: ${method}`);
 }
 
 
@@ -1475,7 +1611,7 @@ function adminPageHtml(state) {
         <input name="target_key" id="f_key" placeholder="留空不修改">
         <label>Gateway API Key</label>
         <input name="gateway_api_key" id="f_gateway_key" placeholder="公网 /v1 鉴权 key，留空不修改">
-        <div class="hint">当前状态：${state.gatewayKeyStatus}。公开部署并开启 ALLOW_PUBLIC_API=true 时，Kelivo 的 API Key 请填写这个 Gateway API Key，不要填写上游 API Key。</div>
+        <div class="hint">当前状态：${state.gatewayKeyStatus}。Kelivo 里填的 API Key 就是这个 Gateway API Key（不是上游 DeepSeek 的 Key）。</div>
         <label>Model Name</label>
         <input name="model_name" id="f_model" value="${state.currentModel}">
         <label>Bark Key</label>
@@ -1724,7 +1860,7 @@ async function handleRequest(request, env) {
 
   // ---------- /v1/models ----------
   if (path === "/v1/models" && request.method === "GET") {
-    return json({ object: "list", data: [{ id: cfg.MODEL_NAME || "gateway-model", object: "model", created: 0, owned_by: "gateway" }] });
+    return json({ object: "list", data: [{ id: cfg.MODEL_NAME || "deepseek-v4-flash", object: "model", created: 0, owned_by: "gateway" }] });
   }
 
   // ---------- /v1/chat/completions ----------
@@ -1771,30 +1907,17 @@ async function handleRequest(request, env) {
         (m.role === "assistant" && m.tool_calls) || m.role === "tool")
     );
 
-    // 注入历史特殊事件（按时间顺序），改成"你之前主动发过"的明确措辞，
-    // 让 AI 知道这些推送是它自己发的，而不是系统记录
-    const oldEvents = stripPosition(
-      oldTimeline.filter(isSpecialEvent).sort((a, b) => {
-        const timeA = extractTimestampWithMemory(a, tsDB);
-        const timeB = extractTimestampWithMemory(b, tsDB);
-        if (timeA && timeB) return timeA - timeB;
-        return 0;
-      })
-    );
-    for (const event of oldEvents) {
-      const eventTime = extractTimestampWithMemory(event, tsDB);
-      const proactive = extractProactivePushContent(event);
-      // 有推送正文的，注入成"你之前主动说过"；否则保持原样
-      const injected = proactive
-        ? { role: "assistant", content: `（你之前主动给用户发过一条消息：${proactive}）` }
-        : event;
-      if (!eventTime) { llmMessages.push(injected); continue; }
-      let inserted = false;
-      for (let i = 0; i < llmMessages.length; i++) {
-        const msgTime = extractTimestampWithMemory(llmMessages[i], tsDB);
-        if (msgTime && msgTime >= eventTime) { llmMessages.splice(i, 0, injected); inserted = true; break; }
-      }
-      if (!inserted) llmMessages.push(injected);
+    // 让 AI 明确知道它主动发过什么、在什么时候发的：注入带时间戳的推送记录
+    const proactivePushes = oldTimeline
+      .filter(isSpecialEvent)
+      .map(extractProactivePushRecord)
+      .filter(Boolean)
+      .slice(-10);
+    if (proactivePushes.length > 0) {
+      llmMessages.unshift({
+        role: "system",
+        content: `【你主动发过的消息记录】以下是你之前主动给她发的手机推送（这是你自己的行为，你要承认并记住，跟她聊天时顺着这些自然衔接，不要装作没发过）：\n${proactivePushes.map((p, i) => `${i + 1}. ${p.time ? `${p.time} ｜ ` : ""}${p.body}`).join("\n")}`
+      });
     }
 
     // 自动修复不完整的 tool 调用（与 Node 版一致）
@@ -1840,35 +1963,62 @@ async function handleRequest(request, env) {
 
     // 用户发消息后无需重置唤醒计时：唤醒检查会从时间线解析"最后说话时间"（与原版一致）
 
-    // 注入个人上下文（时间/天气/例假）+ 推送指令，让 AI 在对话里也知道这些信息
-    const personalCtx = await buildPersonalContext(env, cfg);
-    const upstreamResponse = await fetch(cfg.TARGET_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.TARGET_API_KEY}` },
-      body: JSON.stringify({ ...body, model: body.model || cfg.MODEL_NAME, messages: injectContext(llmMessages, personalCtx + CHAT_STYLE_INSTRUCTION + PUSH_INSTRUCTION) })
-    });
+    // 工具调用循环：模型需要时主动查推送/聊天记录（deepseek-v4 原生 tool calls）
+    const toolMessages = llmMessages.map(m => ({ ...m }));
+    const upstreamHeaders = { "Content-Type": "application/json", Authorization: `Bearer ${cfg.TARGET_API_KEY}` };
+    const MAX_TOOL_ROUNDS = 3;
+    let fullText = "";
+    let upstreamContentType = "application/json";
 
-    const upstreamContentType = upstreamResponse.headers.get("content-type") || "";
-    const shouldStream = requestedStream || upstreamContentType.includes("text/event-stream");
-    const fullText = await upstreamResponse.text();
-
-    // 上游出错：原样透传错误
-    if (!upstreamResponse.ok) {
-      return new Response(fullText, {
-        status: upstreamResponse.status,
-        headers: { "Content-Type": upstreamContentType || "application/json" }
+    for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+      const upstreamResponse = await fetch(cfg.TARGET_API_URL, {
+        method: "POST",
+        headers: upstreamHeaders,
+        body: JSON.stringify({ ...body, model: cfg.MODEL_NAME, messages: toolMessages, tools: CHAT_TOOLS, stream: false })
       });
+      upstreamContentType = upstreamResponse.headers.get("content-type") || "";
+      fullText = await upstreamResponse.text();
+
+      // 上游出错：原样透传错误
+      if (!upstreamResponse.ok) {
+        return new Response(fullText, {
+          status: upstreamResponse.status,
+          headers: { "Content-Type": upstreamContentType || "application/json" }
+        });
+      }
+
+      let data = null;
+      try { data = JSON.parse(fullText); } catch {}
+      const msg = data?.choices?.[0]?.message;
+      const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
+      if (toolCalls.length === 0 || round === MAX_TOOL_ROUNDS) break;
+
+      // 模型请求调用工具：执行后把结果追加回对话，再让它继续
+      toolMessages.push({ role: "assistant", content: msg.content ?? null, tool_calls: toolCalls });
+      for (const tc of toolCalls) {
+        let args = {};
+        try { args = JSON.parse(tc.function?.arguments || "{}"); } catch {}
+        const result = await executeChatTool(tc.function?.name, args, env);
+        toolMessages.push({ role: "tool", tool_call_id: tc.id, content: result });
+      }
+      console.log(`[v1] 工具调用：${toolCalls.map(t => t.function?.name).join(", ")}`);
     }
+
+    const shouldStream = requestedStream;
 
     // 解析 [PUSH] 标记：用户在对话里要求发推送时，AI 会输出该标记
     const aiContent = extractContentFromUpstream(fullText, upstreamContentType);
     const pushExtract = extractPushFromReply(aiContent);
     if (pushExtract.push) {
-      const pr = await sendPushNotification(env, cfg, {
-        title: (cfg.PUSH_TITLE || "来自 AI").slice(0, 20),
-        body: pushExtract.push.body.slice(0, 20)
-      });
+      const pushTitle = (cfg.PUSH_TITLE || "来自 AI").slice(0, 20);
+      const pushBody = pushExtract.push.body.slice(0, 20);
+      const pr = await sendPushNotification(env, cfg, { title: pushTitle, body: pushBody });
       console.log(`[v1] 对话内推送请求，发送结果: ${JSON.stringify(pr)}`);
+      // 记录这次推送：既更新唤醒冷却，也写进时间线，让 AI 之后知道自己发过什么
+      if (pr.ok) {
+        await env.CONFIG.put("lastWakeSent", new Date().toISOString());
+        await appendSpecialEvent(env, `（${nowTs} 刚刚给用户发了${pr.providerLabel}推送：${pushTitle}｜${pushBody}）`);
+      }
     }
 
     if (shouldStream) {
@@ -1887,6 +2037,11 @@ async function handleRequest(request, env) {
       status: 200,
       headers: { "Content-Type": upstreamContentType || "application/json" }
     });
+  }
+
+  // ---------- /mcp MCP 服务（Kelivo 的 MCP 功能连这里） ----------
+  if (path === "/mcp") {
+    return handleMcp(request, env, cfg);
   }
 
   // ---------- /admin 管理页 ----------
@@ -2022,7 +2177,7 @@ async function handleRequest(request, env) {
     let err = null;
     try { await runWakeUp(env, cfg); } catch (e) { err = e.message + " | " + e.stack; }
     const after = await read();
-    return json({ ok: true, error: err, before, after });
+    return json({ ok: true, error: err, before, after, cfg: { targetUrl: cfg.TARGET_API_URL, model: cfg.MODEL_NAME } });
   }
 
   // ---------- /test-bark ----------

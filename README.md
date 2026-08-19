@@ -65,9 +65,9 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 
 | 变量名 | 填什么 | 说明 |
 |--------|--------|------|
-| TARGET_API_URL | https://api.deepseek.com/v1/chat/completions | 上游 OpenAI 兼容端点 |
+| TARGET_API_URL | https://api.deepseek.com/v1/chat/completions | DeepSeek 官方 OpenAI 兼容端点 |
 | TARGET_API_KEY | sk- 开头的 DeepSeek Key | 用 Secret 存储 |
-| MODEL_NAME | deepseek-chat | 模型名 |
+| MODEL_NAME | deepseek-v4-flash | 官方 V4 模型（老 deepseek-chat / deepseek-reasoner 已于 2026-07-24 停用） |
 | GATEWAY_API_KEY | 自己编一长串随机字符 | Kelivo 里填这个，不是上游 Key |
 | BARK_KEY | Bark App 里的 Key | iPhone 推送 |
 | ADMIN_USER | 如 admin | 管理页用户名 |
@@ -76,6 +76,9 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 
 填完后点右上角 Deploy 重新部署，让变量生效。
 
+> [!NOTE]
+> **模型是单一真相源**：聊天和主动唤醒都用 Worker 里 `MODEL_NAME` 指定的模型（`deepseek-v4-flash`，官方默认开启思考模式=深度推理）。Kelivo 供应商里填的 Model 只用于显示，会被 Worker 覆盖成上面的官方模型，避免在两边改来改去导致「崩人设」。人设和记忆只在 Kelivo 里维护，Worker 不注入任何风格指令。
+
 ### 第 5 步：绑定自定义域名
 
 1. Worker → Settings → Domains & Routes → Custom Domains → Add
@@ -83,7 +86,7 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 3. Cloudflare 会自动配好 DNS 和证书，等状态变绿
 
 > [!NOTE]
-> 必须绑定自己的域名，不能直接用 Cloudflare 默认的 *.workers.dev 地址。
+> 必须绑定自己的域名，不能直接用 Cloudflare 默认的 *.workers.dev 地址（该地址在中国大陆访问不稳定/被墙）。如果你不绑定域名，或只想自己用，开 VPN 也能稳定访问 `*.workers.dev`。
 
 ### 第 6 步：Kelivo 接入
 
@@ -93,9 +96,20 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 |--------|--------|
 | Base URL | https://ai.你的域名.com/v1 |
 | API Key | 第 4 步的 GATEWAY_API_KEY |
-| Model | deepseek-chat |
+| Model | deepseek-v4-flash |
 
 点测试连通性，成功后即可开聊。
+
+### 第 7 步（可选）：用 MCP 让 AI 主动查「自己发过什么」
+
+Worker 内置了一个 MCP 服务（Streamable HTTP），Kelivo 的 MCP 功能可以直接连上来，让 AI 需要时主动查推送/聊天记录：
+
+| 设置项 | 填什么 |
+|--------|--------|
+| MCP Server 地址 | https://你的域名/mcp（workers.dev 则是 https://dylan-heartbeat.你的子域.workers.dev/mcp） |
+| 凭证 / Key | 第 4 步的 GATEWAY_API_KEY |
+
+连接后会多出两个工具：`read_push_records`（查主动推送记录，含时间+正文）、`read_chat_timeline`（查最近聊天时间线）。Kelivo 里启用 MCP 后，模型可能发起工具调用，你审核后即可执行。
 
 ### 验证
 
@@ -133,6 +147,9 @@ Worker → Settings → Variables → Add。密码类建议用 Add secret（加�
 | 手机收不到推送 | Bark 里先点推送测试；确认 BARK_KEY 填对 |
 | 想改 AI 人设 | 在 Kelivo 里改助手的人设或记忆即可，本 Worker 不会覆盖 |
 | 想清空记忆 | 在 KV 的 CONFIG namespace 里删掉 timeline 键 |
+| 打不开 /admin 或 workers.dev | 绑定自定义域名，或开 VPN 访问 |
+| AI 不知道自己发过什么 | 聊天时 Worker 会把「时间 + 推送内容」注入给模型；确认上游模型是 deepseek-v4-flash |
+| 想在对话里让 AI 发推送（[PUSH]） | 把 [PUSH]标题\|正文[/PUSH] 的用法写进 Kelivo 的人设里（Worker 不再注入推送指令，避免崩人设） |
 
 ---
 

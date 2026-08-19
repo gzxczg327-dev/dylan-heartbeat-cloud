@@ -18,10 +18,14 @@ crons = ["* * * * *"]
 # 非敏感配置可放这里；敏感配置（API Key 等）请用面板的 Variables/Secrets 设置
 # [vars]
 # TIME_ZONE = "Asia/Shanghai"
-# MODEL_NAME = "deepseek-chat"
+# MODEL_NAME = "deepseek-v4-flash"
 # DAY_WAKE_AFTER_MINUTES = "60"
 # NIGHT_WAKE_AFTER_MINUTES = "120"
 # DAY_CHECK_INTERVAL_MINUTES = "10"
 # NIGHT_CHECK_INTERVAL_MINUTES = "120"
 # WAKE_DAY_START_HOUR = "10"
 # WAKE_DAY_END_HOUR = "24"
+
+[[kv_namespaces]]
+binding = "CONFIG"
+id = "704fcc2cfdf3435d9e7f5d1044384121"
