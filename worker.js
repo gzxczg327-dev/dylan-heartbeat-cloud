@@ -127,6 +127,31 @@ async function savePresets(env, presets) {
   await kvPutJson(env.CONFIG, "presets", presets);
 }
 
+// ---------- 话题库（存 KV key "topics"，AI 主动发消息时从这里取材） ----------
+async function loadTopics(env) {
+  const raw = await kvGetJson(env.CONFIG, "topics", []);
+  return Array.isArray(raw) ? raw.map(t => String(t).trim()).filter(Boolean) : [];
+}
+
+async function saveTopics(env, topics) {
+  const cleaned = (Array.isArray(topics) ? topics : [])
+    .map(t => String(t).trim())
+    .filter(Boolean);
+  await kvPutJson(env.CONFIG, "topics", cleaned);
+  return cleaned;
+}
+
+function pickRandomTopics(topics, count = 3) {
+  if (!Array.isArray(topics) || topics.length === 0) return [];
+  const copy = [...topics];
+  const picked = [];
+  const n = Math.min(count, copy.length);
+  for (let i = 0; i < n; i++) {
+    picked.push(copy.splice(Math.floor(Math.random() * copy.length), 1)[0]);
+  }
+  return picked;
+}
+
 // ---------- 消息处理（移植自 server.js） ----------
 function normalizeContentToText(content) {
   if (typeof content === "string") return content;
@@ -436,6 +461,47 @@ function getPeriodContext(cfg, date = new Date()) {
     }
   }
   return `用户当前处于月经周期第 ${dayInCycle + 1} 天（${phase}）`;
+}
+
+// ---------- 日期 / 节日 / 节气上下文 ----------
+const SOLAR_HOLIDAYS = {
+  "01-01": "元旦", "02-14": "情人节", "03-08": "妇女节", "03-12": "植树节",
+  "04-01": "愚人节", "05-01": "劳动节", "05-04": "青年节", "06-01": "儿童节",
+  "07-01": "建党节", "08-01": "建军节", "09-10": "教师节", "10-01": "国庆节",
+  "10-31": "万圣节前夜", "12-24": "平安夜", "12-25": "圣诞节"
+};
+const SOLAR_TERMS = {
+  "01-05": "小寒", "01-20": "大寒", "02-04": "立春", "02-19": "雨水",
+  "03-05": "惊蛰", "03-20": "春分", "04-05": "清明", "04-20": "谷雨",
+  "05-05": "立夏", "05-21": "小满", "06-06": "芒种", "06-21": "夏至",
+  "07-07": "小暑", "07-23": "大暑", "08-07": "立秋", "08-23": "处暑",
+  "09-07": "白露", "09-23": "秋分", "10-08": "寒露", "10-23": "霜降",
+  "11-07": "立冬", "11-22": "小雪", "12-07": "大雪", "12-22": "冬至"
+};
+// 2026 农历节日（按公历日期近似，仅 2026 年有效，跨年需更新此表）
+const LUNAR_HOLIDAYS_2026 = {
+  "02-17": "春节", "03-03": "元宵节", "06-19": "端午节",
+  "08-19": "七夕节", "09-25": "中秋节", "10-18": "重阳节"
+};
+
+function getDateContext(cfg, date = new Date()) {
+  try {
+    const parts = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: cfg.TIME_ZONE || "Asia/Shanghai",
+      year: "numeric", month: "2-digit", day: "2-digit", weekday: "long"
+    }).formatToParts(date);
+    const map = {};
+    for (const p of parts) map[p.type] = p.value;
+    const mmdd = `${map.month}-${map.day}`;
+    const marks = [];
+    if (SOLAR_HOLIDAYS[mmdd]) marks.push(SOLAR_HOLIDAYS[mmdd]);
+    if (LUNAR_HOLIDAYS_2026[mmdd]) marks.push(LUNAR_HOLIDAYS_2026[mmdd]);
+    if (SOLAR_TERMS[mmdd]) marks.push(`节气·${SOLAR_TERMS[mmdd]}`);
+    const markText = marks.length ? `，${marks.join("、")}` : "";
+    return `今天是 ${map.year}年${Number(map.month)}月${Number(map.day)}日，${map.weekday}${markText}。`;
+  } catch {
+    return "";
+  }
 }
 
 // ---------- 推送标记解析 [PUSH]标题|正文[/PUSH] ----------
@@ -751,7 +817,7 @@ function pickRandomMotivations() {
   return picked;
 }
 
-function buildWakePrompt(cfg, currentTime, diffMinutes, topicContext = "", recentPushes = "") {
+function buildWakePrompt(cfg, currentTime, diffMinutes, topicContext = "", recentPushes = "", dateContext = "", topicsText = "") {
   const motivations = pickRandomMotivations().map(m => `- ${m}`).join("\n");
   return `
 ## 最高优先级规则
@@ -762,8 +828,10 @@ function buildWakePrompt(cfg, currentTime, diffMinutes, topicContext = "", recen
 
 ## 唤醒信息
 - 当前时间：${currentTime}
+${dateContext ? `- ${dateContext}` : ""}
 - 距离用户最后一条消息：${diffMinutes} 分钟
 ${topicContext ? `\n## 你可以聊的素材（天气/周期/时间等，作为自然话题，不要生硬）\n${topicContext}\n` : ""}
+${topicsText ? `\n## 你维护的话题库（挑一个顺其自然的切入，自然地带出来，不要生硬照搬、不要逐条罗列）\n${topicsText}\n` : ""}
 
 ## 你可以考虑这些方向（也可以有自己的想法，符合你性格即可）
 ${motivations}
@@ -822,7 +890,10 @@ async function runWakeUp(env, cfg) {
   const timeline = await loadTimeline(env);
   const weatherContext = await fetchWeatherContext(cfg);
   const periodContext = getPeriodContext(cfg, now);
+  const dateContext = getDateContext(cfg, now);
   const topicContext = [weatherContext, periodContext].filter(Boolean).join("\n");
+  const topics = await loadTopics(env);
+  const topicsText = pickRandomTopics(topics, 3).map(t => `- ${t}`).join("\n");
 
   const cleanMessages = stripPosition(timeline);
   // 最近主动推送记录：让 AI 知道说过什么，避免重复
@@ -835,7 +906,7 @@ async function runWakeUp(env, cfg) {
       return `- ${stripLeadingTimestamp(normalizeContentToText(m.content)).trim()}`;
     })
     .join("\n");
-  const wakePrompt = buildWakePrompt(cfg, formatLocalTimestamp(cfg), diffMinutes, topicContext, recentPushes);
+  const wakePrompt = buildWakePrompt(cfg, formatLocalTimestamp(cfg), diffMinutes, topicContext, recentPushes, dateContext, topicsText);
   const historyText = cleanMessages
     .filter(msg => msg.role !== "system")
     .filter(msg => {
@@ -1025,6 +1096,20 @@ async function executeChatTool(name, args, env, cfg) {
     await appendSpecialEvent(env, `（${formatLocalTimestamp(cfg)} 刚刚给用户发了${pr.providerLabel}推送：${title}｜${body}）`);
     return `（已发送 ${pr.providerLabel} 推送：${title}｜${body}）`;
   }
+  if (name === "read_topics") {
+    const topics = await loadTopics(env);
+    if (!topics.length) return "（话题库还是空的）";
+    return topics.map((t, i) => `${i + 1}. ${t}`).join("\n");
+  }
+  if (name === "add_topic") {
+    const text = String(args?.topic || "").trim().slice(0, 200);
+    if (!text) return "（未添加：话题内容为空）";
+    const topics = await loadTopics(env);
+    if (topics.includes(text)) return `（话题已存在：${text}）`;
+    topics.push(text);
+    await saveTopics(env, topics);
+    return `（已添加话题：${text}）`;
+  }
   return "（未知工具）";
 }
 
@@ -1061,6 +1146,24 @@ function mcpToolList() {
           body: { type: "string", description: "推送正文（≤20 字），符合人设、口语化" }
         },
         required: ["body"]
+      }
+    },
+    {
+      name: "read_topics",
+      description: "查询你维护的「话题库」——里面是你平时可以主动和用户聊的话题/兴趣/素材（如八卦、新闻、动漫、小说等）。需要找话题、开启主动消息时调用。",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        required: []
+      }
+    },
+    {
+      name: "add_topic",
+      description: "往话题库添加一条新话题/素材（记下一个以后可以主动聊的内容）。",
+      inputSchema: {
+        type: "object",
+        properties: { topic: { type: "string", description: "要添加的话题内容（一句话）" } },
+        required: ["topic"]
       }
     }
   ];
@@ -1534,6 +1637,52 @@ function adminPageHtml(state) {
       padding: 12px 14px;
     }
 
+    .topics-box {
+      background: rgba(255, 250, 252, 0.5);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 24px;
+      border: 1px solid rgba(230, 200, 208, 0.3);
+    }
+
+    .topics-box h3 {
+      margin: 0 0 6px 0;
+      font-size: 12px;
+      color: #8a4a58;
+      font-weight: 600;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    .topics-box .hint {
+      margin: 0 0 10px 0;
+      text-align: left;
+    }
+
+    .topics-box textarea {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid rgba(200, 160, 170, 0.3);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.7);
+      font-family: "Noto Serif SC", serif;
+      font-size: 13px;
+      line-height: 1.7;
+      color: #5a4046;
+      resize: vertical;
+      min-height: 120px;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .topics-box textarea:focus {
+      outline: none;
+      border-color: #c89aa6;
+      box-shadow: 0 0 0 3px rgba(200, 154, 166, 0.1);
+      background: rgba(255, 255, 255, 0.95);
+    }
+
     .section-title {
       margin-top: 22px;
       padding-top: 18px;
@@ -1591,6 +1740,14 @@ function adminPageHtml(state) {
     <div class="diary-box">
       <h3>Wake Diary</h3>
       ${state.diaryHtml}
+    </div>
+
+    <!-- 话题库 -->
+    <div class="topics-box">
+      <h3>话题库</h3>
+      <div class="hint">每行一个话题/素材（八卦、新闻、动漫、小说、兴趣…）。主动唤醒时 AI 会从这里随机挑话题切入；AI 也能用 MCP 的 read_topics / add_topic 读写。</div>
+      <textarea id="topicsArea" placeholder="每行一个话题，例如：&#10;最近很火的那部新番&#10;今天的热搜八卦">${state.topicsText}</textarea>
+      <button type="button" onclick="saveTopics()">保存话题库</button>
     </div>
 
     <!-- 预设方案 -->
@@ -1823,6 +1980,25 @@ function adminPageHtml(state) {
       }
     }
 
+    async function saveTopics() {
+      const text = document.getElementById("topicsArea").value;
+      try {
+        const resp = await fetch("/admin/topics/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": AUTH_HEADER },
+          body: JSON.stringify({ topics: text })
+        });
+        const result = await resp.json();
+        if (result.success) {
+          alert("话题库已保存（" + result.count + " 条）。");
+        } else {
+          alert("保存失败：" + (result.error || "未知错误"));
+        }
+      } catch (e) {
+        alert("请求失败：" + e.message);
+      }
+    }
+
     renderPresets();
   </script>
 </body>
@@ -2042,6 +2218,7 @@ async function handleRequest(request, env) {
       `).join("")
       : `<div class="diary-empty">还没有日记。模型在 wake-up 回复里输出 [DIARY]...[/DIARY] 后会保存到这里。</div>`;
     const presets = await loadPresets(env);
+    const topics = await loadTopics(env);
     // 批注：用 UTF-8 编码后再 base64，与 checkBasicAuth 的 TextDecoder(UTF-8) 对齐，
     // 修复非 ASCII（中文/emoji）管理员密码在管理页内请求时鉴权失败的问题。
     const authToken = btoa(String.fromCharCode(...new TextEncoder().encode(`${cfg.ADMIN_USER}:${cfg.ADMIN_PASSWORD}`)));
@@ -2050,6 +2227,7 @@ async function handleRequest(request, env) {
       wakeStatus,
       runtimeNotice: "",
       diaryHtml,
+      topicsText: escapeHtml(topics.join("\n")),
       currentUrl: escapeHtml(cfg.TARGET_API_URL),
       currentModel: escapeHtml(cfg.MODEL_NAME),
       currentIcon: escapeHtml(cfg.CUSTOM_ICON_URL),
@@ -2099,6 +2277,16 @@ async function handleRequest(request, env) {
     }
     await saveConfig(env, updates);
     return json({ success: true });
+  }
+
+  // ---------- /admin/topics/save ----------
+  if (path === "/admin/topics/save" && request.method === "POST") {
+    let body;
+    try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
+    const raw = String(body?.topics ?? "");
+    const topics = raw.split("\n").map(t => t.trim()).filter(Boolean);
+    const saved = await saveTopics(env, topics);
+    return json({ success: true, count: saved.length });
   }
 
   // ---------- /admin/presets/save ----------
