@@ -107,9 +107,13 @@ Worker 内置了一个 MCP 服务（Streamable HTTP），Kelivo 的 MCP 功能�
 | 设置项 | 填什么 |
 |--------|--------|
 | MCP Server 地址 | https://你的域名/mcp（workers.dev 则是 https://dylan-heartbeat.你的子域.workers.dev/mcp） |
-| 凭证 / Key | 第 4 步的 GATEWAY_API_KEY |
+| 传输类型 | HTTP（Streamable HTTP） |
+| 自定义请求头 | 加一条：Header 名填 `Authorization`，Header 值填 `Bearer <第 4 步的 GATEWAY_API_KEY>` |
 
-连接后会多出两个工具：`read_push_records`（查主动推送记录，含时间+正文）、`read_chat_timeline`（查最近聊天时间线）。Kelivo 里启用 MCP 后，模型可能发起工具调用，你审核后即可执行。
+> [!NOTE]
+> Kelivo 里 MCP 的「凭证」就是**自定义请求头（Custom Headers）**。也可以填 `x-api-key` = `GATEWAY_API_KEY`。没有这个请求头，`/mcp` 会返回 401 Unauthorized。
+
+连接后会多出三个工具：`read_push_records`（查主动推送记录，含时间+正文）、`read_chat_timeline`（查最近聊天时间线）、`send_push`（对话内按你要求发一条 Bark）。Kelivo 里启用 MCP 后，模型可能发起工具调用，你审核后即可执行。
 
 ### 验证
 
