@@ -981,36 +981,9 @@ async function buildChatContextMessages(env) {
   return result;
 }
 
-// ---------- 工具调用（MCP 的 OpenAI 兼容等价物） ----------
-// 让 AI 在需要时主动调用这些函数去查 Worker 里记的推送/聊天记录，
-// 而不是只靠被动注入。deepseek-v4 系列原生支持 tool calls。
-const CHAT_TOOLS = [
-  {
-    type: "function",
-    function: {
-      name: "read_push_records",
-      description: "查询你（AI）之前主动发给用户的手机推送记录，含发送时间和正文。当你需要回忆自己发过什么、避免重复，或用户问起「你之前发了什么」时调用。",
-      parameters: {
-        type: "object",
-        properties: { limit: { type: "integer", description: "最多返回条数，默认 10" } },
-        required: []
-      }
-    }
-  },
-  {
-    type: "function",
-    function: {
-      name: "read_chat_timeline",
-      description: "查询最近的聊天时间线（用户和 AI 的对话，含时间）。当你需要回忆更早的上下文时调用。",
-      parameters: {
-        type: "object",
-        properties: { limit: { type: "integer", description: "最多返回条数，默认 20" } },
-        required: []
-      }
-    }
-  }
-];
-
+// ---------- 工具执行（供 /mcp 的 tools/call 调用） ----------
+// 这里只负责「查数据」，由 /mcp 端点暴露成 MCP 工具；
+// 聊天网关不再注入 tools，避免和 Kelivo 自己的 MCP 工具冲突。
 async function executeChatTool(name, args, env) {
   const limit = Math.max(1, Math.min(50, Number(args?.limit) || 10));
   if (name === "read_push_records") {
@@ -1959,54 +1932,36 @@ async function handleRequest(request, env) {
       return json({ error: "TARGET_API_URL / TARGET_API_KEY 未配置" }, 500);
     }
 
-    const requestedStream = body?.stream === true;
+    // 透明转发到上游：保留 Kelivo 传来的 tools（MCP 工具）与 stream 等参数，
+    // 只把 model 统一成 Worker 配置的模型、messages 换成注入过推送记录的消息。
+    const upstreamResponse = await fetch(cfg.TARGET_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.TARGET_API_KEY}` },
+      body: JSON.stringify({ ...body, model: cfg.MODEL_NAME, messages: llmMessages })
+    });
 
-    // 用户发消息后无需重置唤醒计时：唤醒检查会从时间线解析"最后说话时间"（与原版一致）
+    const upstreamContentType = upstreamResponse.headers.get("content-type") || "";
+    const isStreaming = upstreamContentType.includes("text/event-stream");
 
-    // 工具调用循环：模型需要时主动查推送/聊天记录（deepseek-v4 原生 tool calls）
-    const toolMessages = llmMessages.map(m => ({ ...m }));
-    const upstreamHeaders = { "Content-Type": "application/json", Authorization: `Bearer ${cfg.TARGET_API_KEY}` };
-    const MAX_TOOL_ROUNDS = 3;
-    let fullText = "";
-    let upstreamContentType = "application/json";
-
-    for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-      const upstreamResponse = await fetch(cfg.TARGET_API_URL, {
-        method: "POST",
-        headers: upstreamHeaders,
-        body: JSON.stringify({ ...body, model: cfg.MODEL_NAME, messages: toolMessages, tools: CHAT_TOOLS, stream: false })
+    // 上游出错：原样透传错误
+    if (!upstreamResponse.ok) {
+      const errText = await upstreamResponse.text();
+      return new Response(errText, {
+        status: upstreamResponse.status,
+        headers: { "Content-Type": upstreamContentType || "application/json" }
       });
-      upstreamContentType = upstreamResponse.headers.get("content-type") || "";
-      fullText = await upstreamResponse.text();
-
-      // 上游出错：原样透传错误
-      if (!upstreamResponse.ok) {
-        return new Response(fullText, {
-          status: upstreamResponse.status,
-          headers: { "Content-Type": upstreamContentType || "application/json" }
-        });
-      }
-
-      let data = null;
-      try { data = JSON.parse(fullText); } catch {}
-      const msg = data?.choices?.[0]?.message;
-      const toolCalls = Array.isArray(msg?.tool_calls) ? msg.tool_calls : [];
-      if (toolCalls.length === 0 || round === MAX_TOOL_ROUNDS) break;
-
-      // 模型请求调用工具：执行后把结果追加回对话，再让它继续
-      toolMessages.push({ role: "assistant", content: msg.content ?? null, tool_calls: toolCalls });
-      for (const tc of toolCalls) {
-        let args = {};
-        try { args = JSON.parse(tc.function?.arguments || "{}"); } catch {}
-        const result = await executeChatTool(tc.function?.name, args, env);
-        toolMessages.push({ role: "tool", tool_call_id: tc.id, content: result });
-      }
-      console.log(`[v1] 工具调用：${toolCalls.map(t => t.function?.name).join(", ")}`);
     }
 
-    const shouldStream = requestedStream;
+    // 流式：原样透传（含 tool_calls / reasoning 等 delta），MCP 工具调用由 Kelivo 自己闭环
+    if (isStreaming) {
+      return new Response(upstreamResponse.body, {
+        status: 200,
+        headers: { "Content-Type": upstreamContentType, "Cache-Control": "no-cache" }
+      });
+    }
 
-    // 解析 [PUSH] 标记：用户在对话里要求发推送时，AI 会输出该标记
+    // 非流式：缓冲后处理 [PUSH] 标记（对话内要求发推送）
+    const fullText = await upstreamResponse.text();
     const aiContent = extractContentFromUpstream(fullText, upstreamContentType);
     const pushExtract = extractPushFromReply(aiContent);
     if (pushExtract.push) {
@@ -2021,15 +1976,7 @@ async function handleRequest(request, env) {
       }
     }
 
-    if (shouldStream) {
-      const sse = `data: ${JSON.stringify({ choices: [{ delta: { content: pushExtract.remaining } }] })}\n\ndata: [DONE]\n\n`;
-      return new Response(sse, {
-        status: 200,
-        headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" }
-      });
-    }
-
-    // JSON 响应：把 content 替换为去除标记后的内容
+    // JSON 响应：把 content 替换为去除标记后的内容（保留 tool_calls 等其他字段）
     let outObj = {};
     try { outObj = JSON.parse(fullText); } catch {}
     if (outObj?.choices?.[0]?.message) outObj.choices[0].message.content = pushExtract.remaining;
