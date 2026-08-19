@@ -1979,7 +1979,13 @@ async function handleRequest(request, env) {
     // JSON 响应：把 content 替换为去除标记后的内容（保留 tool_calls 等其他字段）
     let outObj = {};
     try { outObj = JSON.parse(fullText); } catch {}
-    if (outObj?.choices?.[0]?.message) outObj.choices[0].message.content = pushExtract.remaining;
+    if (outObj?.choices?.[0]?.message) {
+      const origContent = outObj.choices[0].message.content;
+      // 只在有正文（或确有 [PUSH] 要剥离）时改写 content；纯 tool_calls 消息保持原样
+      if (origContent != null || pushExtract.push) {
+        outObj.choices[0].message.content = pushExtract.remaining;
+      }
+    }
     return new Response(JSON.stringify(outObj), {
       status: 200,
       headers: { "Content-Type": upstreamContentType || "application/json" }
