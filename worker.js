@@ -52,7 +52,16 @@ const DEFAULTS = {
   WEATHER_UNITS: "metric",
   TIME_ZONE: "Asia/Shanghai",
   ADMIN_USER: "admin",
-  ADMIN_PASSWORD: ""
+  ADMIN_PASSWORD: "",
+  // RSS 热点抓取：定时抓「新闻/动漫/八卦」等头条，注入到主动唤醒里增加话题度
+  RSS_FEEDS: [
+    "https://news.google.com/rss?hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+    "https://news.google.com/rss/search?q=%E5%8A%A8%E6%BC%AB&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+    "https://news.google.com/rss/search?q=%E5%A8%B1%E4%B9%90%20%E5%85%AB%E5%8D%A6&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+  ].join("\n"),
+  RSS_REFRESH_HOURS: "6",
+  RSS_ITEM_LIMIT: "30",
+  RSS_ITEMS_PER_WAKE: "5"
 };
 
 // 读取配置：KV 覆盖环境变量，环境变量覆盖默认值（管理页保存即写 KV，即时生效）
@@ -150,6 +159,77 @@ function pickRandomTopics(topics, count = 3) {
     picked.push(copy.splice(Math.floor(Math.random() * copy.length), 1)[0]);
   }
   return picked;
+}
+
+// ---------- RSS 热点抓取（存 KV key "rss_items"，供主动唤醒注入） ----------
+function decodeHtmlEntities(s) {
+  return String(s || "")
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+}
+
+function extractRssTitles(xmlText) {
+  const titles = [];
+  const itemRe = /<item[^>]*>([\s\S]*?)<\/item>/gi;
+  let m;
+  while ((m = itemRe.exec(xmlText)) !== null) {
+    const t = m[1].match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (t) {
+      const title = decodeHtmlEntities(t[1]).trim().slice(0, 60);
+      if (title) titles.push(title);
+    }
+    if (titles.length >= 10) break;
+  }
+  return titles;
+}
+
+function guessFeedName(url) {
+  const u = String(url || "");
+  if (/动漫|anime/i.test(u)) return "动漫";
+  if (/娱乐|八卦|entertain|gossip|star/i.test(u)) return "八卦娱乐";
+  return "新闻";
+}
+
+async function loadRssItems(env) {
+  return kvGetJson(env.CONFIG, "rss_items", []);
+}
+
+async function saveRssItems(env, items) {
+  await kvPutJson(env.CONFIG, "rss_items", items);
+}
+
+async function refreshRssFeeds(env, cfg) {
+  const feedList = String(cfg.RSS_FEEDS || "")
+    .split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+  if (!feedList.length) return;
+
+  const refreshHours = readNumber(cfg, "RSS_REFRESH_HOURS", 6, 1, 168);
+  const last = await env.CONFIG.get("lastRssRefresh");
+  if (last && (Date.now() - new Date(last).getTime()) < refreshHours * 3600000) return;
+
+  const now = Date.now();
+  const fresh = [];
+  for (const url of feedList) {
+    try {
+      const resp = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (dylan-heartbeat)" } });
+      if (!resp.ok) continue;
+      const text = await resp.text();
+      const source = guessFeedName(url);
+      for (const title of extractRssTitles(text)) {
+        fresh.push({ title, source, ts: now });
+      }
+    } catch {}
+  }
+  if (!fresh.length) return;
+
+  const limit = readNumber(cfg, "RSS_ITEM_LIMIT", 30, 5, 100);
+  const existing = await loadRssItems(env);
+  const merged = [...fresh, ...existing].slice(0, limit);
+  await saveRssItems(env, merged);
+  await env.CONFIG.put("lastRssRefresh", new Date().toISOString());
+  console.log(`[rss] 抓取到 ${fresh.length} 条头条，库内共 ${merged.length} 条`);
 }
 
 // ---------- 消息处理（移植自 server.js） ----------
@@ -817,7 +897,7 @@ function pickRandomMotivations() {
   return picked;
 }
 
-function buildWakePrompt(cfg, currentTime, diffMinutes, topicContext = "", recentPushes = "", dateContext = "", topicsText = "") {
+function buildWakePrompt(cfg, currentTime, diffMinutes, topicContext = "", recentPushes = "", dateContext = "", topicsText = "", newsText = "") {
   const motivations = pickRandomMotivations().map(m => `- ${m}`).join("\n");
   return `
 ## 最高优先级规则
@@ -831,6 +911,7 @@ function buildWakePrompt(cfg, currentTime, diffMinutes, topicContext = "", recen
 ${dateContext ? `- ${dateContext}` : ""}
 - 距离用户最后一条消息：${diffMinutes} 分钟
 ${topicContext ? `\n## 你可以聊的素材（天气/周期/时间等，作为自然话题，不要生硬）\n${topicContext}\n` : ""}
+${newsText ? `\n## 最近网上的新鲜事/热点（挑一个你觉得她会感兴趣的，自然带一句，不要生硬念标题）\n${newsText}\n` : ""}
 ${topicsText ? `\n## 你维护的话题库（挑一个顺其自然的切入，自然地带出来，不要生硬照搬、不要逐条罗列）\n${topicsText}\n` : ""}
 
 ## 你可以考虑这些方向（也可以有自己的想法，符合你性格即可）
@@ -894,6 +975,9 @@ async function runWakeUp(env, cfg) {
   const topicContext = [weatherContext, periodContext].filter(Boolean).join("\n");
   const topics = await loadTopics(env);
   const topicsText = pickRandomTopics(topics, 3).map(t => `- ${t}`).join("\n");
+  const rssItems = await loadRssItems(env);
+  const rssCount = readNumber(cfg, "RSS_ITEMS_PER_WAKE", 5, 1, 10);
+  const newsText = pickRandomTopics(rssItems.map(i => i.title), rssCount).map(t => `- ${t}`).join("\n");
 
   const cleanMessages = stripPosition(timeline);
   // 最近主动推送记录：让 AI 知道说过什么，避免重复
@@ -906,7 +990,7 @@ async function runWakeUp(env, cfg) {
       return `- ${stripLeadingTimestamp(normalizeContentToText(m.content)).trim()}`;
     })
     .join("\n");
-  const wakePrompt = buildWakePrompt(cfg, formatLocalTimestamp(cfg), diffMinutes, topicContext, recentPushes, dateContext, topicsText);
+  const wakePrompt = buildWakePrompt(cfg, formatLocalTimestamp(cfg), diffMinutes, topicContext, recentPushes, dateContext, topicsText, newsText);
   const historyText = cleanMessages
     .filter(msg => msg.role !== "system")
     .filter(msg => {
@@ -1748,6 +1832,9 @@ function adminPageHtml(state) {
       <div class="hint">每行一个话题/素材（八卦、新闻、动漫、小说、兴趣…）。主动唤醒时 AI 会从这里随机挑话题切入；AI 也能用 MCP 的 read_topics / add_topic 读写。</div>
       <textarea id="topicsArea" placeholder="每行一个话题，例如：&#10;最近很火的那部新番&#10;今天的热搜八卦">${state.topicsText}</textarea>
       <button type="button" onclick="saveTopics()">保存话题库</button>
+      <div class="hint" style="margin-top:14px;">RSS 订阅源（每行一个 URL，定时自动抓头条，注入唤醒增加新鲜感；留空则关闭）：</div>
+      <textarea id="rssArea" placeholder="每行一个 RSS 地址">${state.rssFeedsText}</textarea>
+      <button type="button" onclick="saveRss()">保存 RSS 源</button>
     </div>
 
     <!-- 预设方案 -->
@@ -1999,6 +2086,25 @@ function adminPageHtml(state) {
       }
     }
 
+    async function saveRss() {
+      const text = document.getElementById("rssArea").value;
+      try {
+        const resp = await fetch("/admin/rss/save", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": AUTH_HEADER },
+          body: JSON.stringify({ rss_feeds: text })
+        });
+        const result = await resp.json();
+        if (result.success) {
+          alert("RSS 源已保存。下次定时抓取会自动刷新头条。");
+        } else {
+          alert("保存失败：" + (result.error || "未知错误"));
+        }
+      } catch (e) {
+        alert("请求失败：" + e.message);
+      }
+    }
+
     renderPresets();
   </script>
 </body>
@@ -2228,6 +2334,7 @@ async function handleRequest(request, env) {
       runtimeNotice: "",
       diaryHtml,
       topicsText: escapeHtml(topics.join("\n")),
+      rssFeedsText: escapeHtml(String(cfg.RSS_FEEDS || "")),
       currentUrl: escapeHtml(cfg.TARGET_API_URL),
       currentModel: escapeHtml(cfg.MODEL_NAME),
       currentIcon: escapeHtml(cfg.CUSTOM_ICON_URL),
@@ -2287,6 +2394,27 @@ async function handleRequest(request, env) {
     const topics = raw.split("\n").map(t => t.trim()).filter(Boolean);
     const saved = await saveTopics(env, topics);
     return json({ success: true, count: saved.length });
+  }
+
+  // ---------- /admin/rss/save ----------
+  if (path === "/admin/rss/save" && request.method === "POST") {
+    let body;
+    try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
+    const raw = String(body?.rss_feeds ?? "");
+    const feeds = raw.split("\n").map(t => t.trim()).filter(Boolean).join("\n");
+    // RSS_FEEDS 存进 config（KV），saveConfig 会保留其它配置
+    const saved = { ...DEFAULTS };
+    try {
+      const cfg = await env.CONFIG.get("config", "json");
+      if (cfg && typeof cfg === "object") Object.assign(saved, cfg);
+    } catch {}
+    saved.RSS_FEEDS = feeds;
+    const toStore = {};
+    for (const [key, value] of Object.entries(saved)) {
+      if (value !== undefined && value !== null && value !== "") toStore[key] = value;
+    }
+    await env.CONFIG.put("config", JSON.stringify(toStore));
+    return json({ success: true, count: feeds.split("\n").filter(Boolean).length });
   }
 
   // ---------- /admin/presets/save ----------
@@ -2364,6 +2492,11 @@ async function handleRequest(request, env) {
 // ---------- Cron 自动唤醒 ----------
 async function scheduledHandler(event, env) {
   const cfg = await loadConfig(env);
+  try {
+    await refreshRssFeeds(env, cfg);
+  } catch (err) {
+    console.error("[scheduled] RSS 刷新出错:", err.message);
+  }
   try {
     await runWakeUp(env, cfg);
   } catch (err) {
