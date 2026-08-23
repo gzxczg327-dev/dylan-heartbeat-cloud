@@ -161,6 +161,22 @@ function pickRandomTopics(topics, count = 3) {
   return picked;
 }
 
+// 把一段/多段文字按「换行 + 句末标点」拆成一条条话题（去重、限长）
+function splitTopicsFromText(text) {
+  const seen = new Set();
+  const out = [];
+  for (const line of String(text || "").split(/\n+/)) {
+    for (const p of line.split(/[。！？!?…；;]+/)) {
+      const t = p.trim().replace(/^[·•\-—\d.、\s]+/, "").trim();
+      if (t.length >= 2 && t.length <= 100 && !seen.has(t)) {
+        seen.add(t);
+        out.push(t);
+      }
+    }
+  }
+  return out;
+}
+
 // ---------- RSS 热点抓取（存 KV key "rss_items"，供主动唤醒注入） ----------
 function decodeHtmlEntities(s) {
   return String(s || "")
@@ -1832,6 +1848,9 @@ function adminPageHtml(state) {
       <div class="hint">每行一个话题/素材（八卦、新闻、动漫、小说、兴趣…）。主动唤醒时 AI 会从这里随机挑话题切入；AI 也能用 MCP 的 read_topics / add_topic 读写。</div>
       <textarea id="topicsArea" placeholder="每行一个话题，例如：&#10;最近很火的那部新番&#10;今天的热搜八卦">${state.topicsText}</textarea>
       <button type="button" onclick="saveTopics()">保存话题库</button>
+      <div class="hint" style="margin-top:14px;">批量导入：把整段文字（如小红书帖子）粘进来，自动按句拆成一条条话题、去重后追加：</div>
+      <textarea id="importArea" placeholder="粘贴多段文字，会按「换行 + 句末标点」自动拆分"></textarea>
+      <button type="button" onclick="importTopics()">批量导入到话题库</button>
       <div class="hint" style="margin-top:14px;">RSS 订阅源（每行一个 URL，定时自动抓头条，注入唤醒增加新鲜感；留空则关闭）：</div>
       <textarea id="rssArea" placeholder="每行一个 RSS 地址">${state.rssFeedsText}</textarea>
       <button type="button" onclick="saveRss()">保存 RSS 源</button>
@@ -2080,6 +2099,28 @@ function adminPageHtml(state) {
           alert("话题库已保存（" + result.count + " 条）。");
         } else {
           alert("保存失败：" + (result.error || "未知错误"));
+        }
+      } catch (e) {
+        alert("请求失败：" + e.message);
+      }
+    }
+
+    async function importTopics() {
+      const text = document.getElementById("importArea").value;
+      if (!text.trim()) { alert("请先粘贴要导入的文字"); return; }
+      try {
+        const resp = await fetch("/admin/topics/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": AUTH_HEADER },
+          body: JSON.stringify({ text: text })
+        });
+        const result = await resp.json();
+        if (result.success) {
+          document.getElementById("importArea").value = "";
+          alert("批量导入完成：新增 " + result.added + " 条（话题库共 " + result.total + " 条）。");
+          location.reload();
+        } else {
+          alert("导入失败：" + (result.error || "未知错误"));
         }
       } catch (e) {
         alert("请求失败：" + e.message);
@@ -2394,6 +2435,21 @@ async function handleRequest(request, env) {
     const topics = raw.split("\n").map(t => t.trim()).filter(Boolean);
     const saved = await saveTopics(env, topics);
     return json({ success: true, count: saved.length });
+  }
+
+  // ---------- /admin/topics/import（批量按句拆分导入） ----------
+  if (path === "/admin/topics/import" && request.method === "POST") {
+    let body;
+    try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
+    const newTopics = splitTopicsFromText(body?.text ?? "");
+    const existing = await loadTopics(env);
+    const merged = [...existing];
+    let added = 0;
+    for (const t of newTopics) {
+      if (!merged.includes(t)) { merged.push(t); added++; }
+    }
+    if (added > 0) await saveTopics(env, merged);
+    return json({ success: true, added, total: merged.length });
   }
 
   // ---------- /admin/rss/save ----------
