@@ -177,6 +177,16 @@ function splitTopicsFromText(text) {
   return out;
 }
 
+// ---------- 文档库（存 KV key "docs"，放文件/长文素材，带标题） ----------
+async function loadDocs(env) {
+  const raw = await kvGetJson(env.CONFIG, "docs", []);
+  return Array.isArray(raw) ? raw.filter(d => d && typeof d === "object" && d.title) : [];
+}
+
+async function saveDocs(env, docs) {
+  await kvPutJson(env.CONFIG, "docs", docs);
+}
+
 // ---------- RSS 热点抓取（存 KV key "rss_items"，供主动唤醒注入） ----------
 function decodeHtmlEntities(s) {
   return String(s || "")
@@ -990,7 +1000,11 @@ async function runWakeUp(env, cfg) {
   const dateContext = getDateContext(cfg, now);
   const topicContext = [weatherContext, periodContext].filter(Boolean).join("\n");
   const topics = await loadTopics(env);
-  const topicsText = pickRandomTopics(topics, 3).map(t => `- ${t}`).join("\n");
+  const docs = await loadDocs(env);
+  const topicsText = [
+    ...pickRandomTopics(topics, 3).map(t => `- ${t}`),
+    ...pickRandomTopics(docs.map(d => d.title), 2).map(t => `- 【文档】${t}（可用 read_doc 读取全文）`)
+  ].join("\n");
   const rssItems = await loadRssItems(env);
   const rssCount = readNumber(cfg, "RSS_ITEMS_PER_WAKE", 5, 1, 10);
   const newsText = pickRandomTopics(rssItems.map(i => i.title), rssCount).map(t => `- ${t}`).join("\n");
@@ -1210,6 +1224,18 @@ async function executeChatTool(name, args, env, cfg) {
     await saveTopics(env, topics);
     return `（已添加话题：${text}）`;
   }
+  if (name === "read_docs") {
+    const docs = await loadDocs(env);
+    if (!docs.length) return "（文档库还是空的）";
+    return docs.map((d, i) => `${i + 1}. ${d.title}`).join("\n");
+  }
+  if (name === "read_doc") {
+    const docs = await loadDocs(env);
+    const q = String(args?.title || "").trim();
+    const doc = docs.find(d => d.title === q) || docs.find(d => d.title.includes(q));
+    if (!doc) return "（没有找到这个文档，先用 read_docs 看有哪些标题）";
+    return `【${doc.title}】\n${String(doc.content || "").slice(0, 6000)}`;
+  }
   return "（未知工具）";
 }
 
@@ -1264,6 +1290,24 @@ function mcpToolList() {
         type: "object",
         properties: { topic: { type: "string", description: "要添加的话题内容（一句话）" } },
         required: ["topic"]
+      }
+    },
+    {
+      name: "read_docs",
+      description: "列出「文档库」里的所有文档标题（用户上传的长文素材，如小红书帖子）。想找长文素材时先调这个看标题。",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        required: []
+      }
+    },
+    {
+      name: "read_doc",
+      description: "按标题读取「文档库」里某篇文档的完整内容。",
+      inputSchema: {
+        type: "object",
+        properties: { title: { type: "string", description: "文档标题（用 read_docs 查到）" } },
+        required: ["title"]
       }
     }
   ];
@@ -1783,6 +1827,49 @@ function adminPageHtml(state) {
       background: rgba(255, 255, 255, 0.95);
     }
 
+    .topics-box input[type="file"] {
+      margin-top: 8px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: #6d5057;
+    }
+
+    .doc-list {
+      margin-top: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .doc-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: rgba(255, 255, 255, 0.6);
+      border: 1px solid rgba(220, 180, 190, 0.3);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 13px;
+      color: #5a4046;
+    }
+
+    .doc-item span {
+      word-break: break-all;
+    }
+
+    .doc-item button {
+      flex-shrink: 0;
+      width: auto;
+      margin-top: 0;
+      padding: 6px 12px;
+      font-size: 11px;
+      background: rgba(255, 240, 243, 0.7);
+      border: 1px solid rgba(240, 200, 210, 0.4);
+      border-radius: 8px;
+      color: #a85a68;
+    }
+
     .section-title {
       margin-top: 22px;
       padding-top: 18px;
@@ -1854,6 +1941,15 @@ function adminPageHtml(state) {
       <div class="hint" style="margin-top:14px;">RSS 订阅源（每行一个 URL，定时自动抓头条，注入唤醒增加新鲜感；留空则关闭）：</div>
       <textarea id="rssArea" placeholder="每行一个 RSS 地址">${state.rssFeedsText}</textarea>
       <button type="button" onclick="saveRss()">保存 RSS 源</button>
+    </div>
+
+    <!-- 文档库 -->
+    <div class="topics-box">
+      <h3>文档库</h3>
+      <div class="hint">上传 .txt / .md 纯文本文件（如小红书帖子合集），每份文件 = 一篇文档，标题取文件名。AI 能用 MCP 的 read_docs / read_doc 读取。</div>
+      <input type="file" id="docFiles" multiple accept=".txt,.md,text/plain,text/markdown">
+      <button type="button" onclick="uploadDocs()">上传到文档库</button>
+      <div class="doc-list">${state.docsHtml}</div>
     </div>
 
     <!-- 预设方案 -->
@@ -2146,6 +2242,67 @@ function adminPageHtml(state) {
       }
     }
 
+    function readFileAsText(file) {
+      return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result || ""));
+        r.onerror = () => reject(r.error);
+        r.readAsText(file);
+      });
+    }
+
+    async function uploadDocs() {
+      const input = document.getElementById("docFiles");
+      const files = Array.from(input.files || []);
+      if (!files.length) { alert("请先选择文件"); return; }
+      const docs = [];
+      for (const file of files) {
+        let text = "";
+        try { text = await readFileAsText(file); } catch (e) {}
+        if (!text.trim()) continue;
+        const title = file.name.replace(/\.[^.]+$/, "").trim().slice(0, 60);
+        docs.push({ title, content: text.trim() });
+      }
+      if (!docs.length) { alert("没有读取到有效文本（请上传 .txt / .md）"); return; }
+      try {
+        const resp = await fetch("/admin/docs/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": AUTH_HEADER },
+          body: JSON.stringify({ docs })
+        });
+        const result = await resp.json();
+        if (result.success) {
+          input.value = "";
+          alert("已上传 " + result.added + " 篇文档（文档库共 " + result.total + " 篇）。");
+          location.reload();
+        } else {
+          alert("上传失败：" + (result.error || "未知错误"));
+        }
+      } catch (e) {
+        alert("请求失败：" + e.message);
+      }
+    }
+
+    async function deleteDoc(title) {
+      if (!confirm("删除文档「" + title + "」？")) return;
+      try {
+        const resp = await fetch("/admin/docs/delete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": AUTH_HEADER },
+          body: JSON.stringify({ title })
+        });
+        const result = await resp.json();
+        if (result.success) {
+          alert("已删除。");
+          location.reload();
+        } else {
+          alert("删除失败：" + (result.error || "未知错误"));
+        }
+      } catch (e) {
+        alert("请求失败：" + e.message);
+      }
+    }
+
     renderPresets();
   </script>
 </body>
@@ -2366,6 +2523,10 @@ async function handleRequest(request, env) {
       : `<div class="diary-empty">还没有日记。模型在 wake-up 回复里输出 [DIARY]...[/DIARY] 后会保存到这里。</div>`;
     const presets = await loadPresets(env);
     const topics = await loadTopics(env);
+    const docs = await loadDocs(env);
+    const docsHtml = docs.length
+      ? docs.map(d => `<div class="doc-item"><span>${escapeHtml(d.title)}</span><button type="button" onclick="deleteDoc('${escapeHtml(d.title).replace(/'/g, "\\'")}')">删除</button></div>`).join("")
+      : `<div class="hint">还没有文档。上传 .txt/.md 文件后出现在这里。</div>`;
     // 批注：用 UTF-8 编码后再 base64，与 checkBasicAuth 的 TextDecoder(UTF-8) 对齐，
     // 修复非 ASCII（中文/emoji）管理员密码在管理页内请求时鉴权失败的问题。
     const authToken = btoa(String.fromCharCode(...new TextEncoder().encode(`${cfg.ADMIN_USER}:${cfg.ADMIN_PASSWORD}`)));
@@ -2376,6 +2537,7 @@ async function handleRequest(request, env) {
       diaryHtml,
       topicsText: escapeHtml(topics.join("\n")),
       rssFeedsText: escapeHtml(String(cfg.RSS_FEEDS || "")),
+      docsHtml,
       currentUrl: escapeHtml(cfg.TARGET_API_URL),
       currentModel: escapeHtml(cfg.MODEL_NAME),
       currentIcon: escapeHtml(cfg.CUSTOM_ICON_URL),
@@ -2471,6 +2633,35 @@ async function handleRequest(request, env) {
     }
     await env.CONFIG.put("config", JSON.stringify(toStore));
     return json({ success: true, count: feeds.split("\n").filter(Boolean).length });
+  }
+
+  // ---------- /admin/docs/upload ----------
+  if (path === "/admin/docs/upload" && request.method === "POST") {
+    let body;
+    try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
+    const incoming = Array.isArray(body?.docs) ? body.docs : [];
+    const existing = await loadDocs(env);
+    let added = 0;
+    for (const d of incoming) {
+      const title = String(d?.title || "").trim().slice(0, 60);
+      const content = String(d?.content || "").trim().slice(0, 20000);
+      if (!title || !content) continue;
+      if (existing.some(x => x.title === title)) continue; // 同名跳过
+      existing.push({ title, content, ts: Date.now() });
+      added++;
+    }
+    if (added > 0) await saveDocs(env, existing.slice(0, 60));
+    return json({ success: true, added, total: existing.length });
+  }
+
+  // ---------- /admin/docs/delete ----------
+  if (path === "/admin/docs/delete" && request.method === "POST") {
+    let body;
+    try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
+    const title = String(body?.title || "").trim();
+    const docs = (await loadDocs(env)).filter(d => d.title !== title);
+    await saveDocs(env, docs);
+    return json({ success: true, total: docs.length });
   }
 
   // ---------- /admin/presets/save ----------
