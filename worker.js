@@ -368,9 +368,13 @@ async function loadTimeline(env) {
 
 async function saveTimeline(env, messages) {
   const sp = messages.find(m => m.role === "system");
-  const nonSP = messages.filter(m => m.role !== "system");
-  const trimmed = nonSP.slice(-49);
-  const final = sp ? [sp, ...trimmed] : trimmed;
+  const real = messages.filter(m => m.role !== "system" && !isSpecialEvent(m));
+  const special = messages.filter(m => m.role !== "system" && isSpecialEvent(m));
+  // 真实对话保留最近 30 条，推送记录只保留最近 15 条，
+  // 避免主动唤醒的推送记录把真实对话（尤其是「用户最后一条消息」）挤出时间线
+  const merged = [...real.slice(-30), ...special.slice(-15)]
+    .sort((a, b) => (a.position || 0) - (b.position || 0));
+  const final = sp ? [sp, ...merged] : merged;
   await kvPutJson(env.CONFIG, "timeline", final);
 }
 
@@ -886,17 +890,22 @@ function getCheckIntervalMinutes(cfg, date = new Date()) {
 }
 
 async function getLastUserTime(env, cfg) {
+  // 优先读专门记录的「最后用户消息时间」：即使时间线被推送记录占满也不会丢
+  const saved = await env.CONFIG.get("lastUserTime");
+  if (saved) {
+    const d = new Date(saved);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  // 兜底：扫描时间线里最后一条用户消息
   const timeline = await loadTimeline(env);
   const tsDB = await loadTimestampDB(env);
   const reversed = [...timeline].reverse();
   for (const msg of reversed) {
     if (msg.role === "user") {
-      // 优先解析内容里的时间戳，查不到就查时间戳记忆库
       const parsed = extractTimestampWithMemory(msg, tsDB);
       if (parsed) return parsed;
     }
   }
-  // 兜底：找不到任何时间戳时，用时间线最后一条消息的 position 估算（视为刚刚）
   return null;
 }
 
@@ -2366,6 +2375,13 @@ async function handleRequest(request, env) {
       }
       return m;
     });
+
+    // 专门记录「最后用户消息时间」，防止时间线被推送记录占满后丢失唤醒依据
+    const lastUserMsg = [...stampedMessages].reverse().find(m => m && m.role === "user");
+    if (lastUserMsg) {
+      const uts = extractTimestamp(normalizeContentToText(lastUserMsg.content));
+      if (uts) await env.CONFIG.put("lastUserTime", uts.toISOString());
+    }
 
     // 用补过时间戳的消息写时间戳记忆库
     const tsDB = await loadTimestampDB(env);
