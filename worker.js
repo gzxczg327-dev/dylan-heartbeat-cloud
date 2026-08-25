@@ -677,13 +677,22 @@ function extractContentFromUpstream(text, contentType) {
 
 // ---------- 日记（存 KV key "diary:YYYY-MM-DD"） ----------
 function extractDiaryFromResponse(text) {
+  const src = String(text || "");
   const diaryBlocks = [];
-  const remainingText = String(text || "").replace(/\[DIARY\]([\s\S]*?)\[\/DIARY\]/gi, (_, content) => {
+  let remainingText = src;
+  // 1) 正常闭合的 [DIARY]...[/DIARY]（可能在任意位置）
+  remainingText = remainingText.replace(/\[DIARY\]([\s\S]*?)\[\/DIARY\]/gi, (_, content) => {
     const diary = String(content || "").trim();
     if (diary) diaryBlocks.push(diary);
     return "";
-  }).trim();
-  return { diaryContent: diaryBlocks.join("\n\n").trim(), remainingText };
+  });
+  // 2) 未闭合的 [DIARY]...（一直到结尾），整段当日记，避免日记标记漏进推送正文
+  remainingText = remainingText.replace(/\[DIARY\][\s\S]*$/i, (match) => {
+    const diary = match.replace(/^\[DIARY\]/i, "").trim();
+    if (diary) diaryBlocks.push(diary);
+    return "";
+  });
+  return { diaryContent: diaryBlocks.join("\n\n").trim(), remainingText: remainingText.trim() };
 }
 
 async function appendDiaryEntry(env, cfg, content) {
